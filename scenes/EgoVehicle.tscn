@@ -1,0 +1,24 @@
+[gd_scene format=3 uid="uid://ddvgxgidq8qdj"]
+
+[ext_resource type="Script" uid="uid://celmgyddwyw5e" path="res://scripts/ego_vehicle.gd" id="1_arvns"]
+[ext_resource type="Texture2D" uid="uid://dmd7rsd6j3in5" path="res://assets/ai_car.png" id="1_hdtj7"]
+[ext_resource type="Script" uid="uid://ikjvqso7i6an" path="res://scripts/sensor_rig.gd" id="3_66r1o"]
+[ext_resource type="Script" uid="uid://ch6f6rp5h20mm" path="res://scripts/camera_controller.gd" id="3_lm4l8"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_en6eq"]
+size = Vector2(80, 144)
+
+[node name="EgoVehicle" type="CharacterBody2D" unique_id=882894357]
+script = ExtResource("1_arvns")
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=279866242]
+texture = ExtResource("1_hdtj7")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1863200354]
+shape = SubResource("RectangleShape2D_en6eq")
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=384405261]
+script = ExtResource("3_lm4l8")
+
+[node name="SensorRig" type="Node2D" parent="." unique_id=1842074395]
+script = ExtResource("3_66r1o")

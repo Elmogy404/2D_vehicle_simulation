@@ -1,0 +1,16 @@
+[gd_scene format=3 uid="uid://cvyjs0ow5ghwi"]
+
+[ext_resource type="Texture2D" uid="uid://xo842n2560yw" path="res://assets/random cars/car_blue_1.png" id="1_l7tx4"]
+[ext_resource type="Script" uid="uid://1ahgei8l3aae" path="res://scripts/traffic_car.gd" id="1_w8xan"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_w8xan"]
+size = Vector2(80, 144)
+
+[node name="TrafficCar" type="CharacterBody2D" unique_id=1479023007]
+script = ExtResource("1_w8xan")
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=812780949 groups=["traffic"]]
+texture = ExtResource("1_l7tx4")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=2045937080]
+shape = SubResource("RectangleShape2D_w8xan")

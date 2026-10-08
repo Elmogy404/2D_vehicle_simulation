@@ -1,0 +1,22 @@
+[gd_scene format=3 uid="uid://x0t7qgybdrem"]
+
+[ext_resource type="PackedScene" uid="uid://b1f3yonajmcth" path="res://scenes/RoadGenerator.tscn" id="1_o5qli"]
+[ext_resource type="Script" uid="uid://cqddnjwgkxvab" path="res://scripts/main.gd" id="1_sugp2"]
+[ext_resource type="PackedScene" uid="uid://ddvgxgidq8qdj" path="res://scenes/EgoVehicle.tscn" id="2_0wfyh"]
+[ext_resource type="Script" uid="uid://kebqn3apsgjn" path="res://scripts/traffic_manager.gd" id="4_jyhfs"]
+[ext_resource type="PackedScene" uid="uid://cvyjs0ow5ghwi" path="res://scenes/traffic_car.tscn" id="5_tbgi4"]
+[ext_resource type="Script" uid="uid://dyfgipywc5v65" path="res://scenes/debug_camera.gd" id="6_tefeu"]
+
+[node name="Main" type="Node2D" unique_id=580353184]
+script = ExtResource("1_sugp2")
+
+[node name="RoadGenerator" parent="." unique_id=1032155224 instance=ExtResource("1_o5qli")]
+
+[node name="EgoVehicle" parent="." unique_id=882894357 instance=ExtResource("2_0wfyh")]
+
+[node name="TrafficManager" type="Node2D" parent="." unique_id=1064430243]
+script = ExtResource("4_jyhfs")
+traffic_car_scene = ExtResource("5_tbgi4")
+
+[node name="DebugCamera" type="Camera2D" parent="." unique_id=1470967347]
+script = ExtResource("6_tefeu")

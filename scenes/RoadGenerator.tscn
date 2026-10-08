@@ -1,0 +1,15 @@
+[gd_scene format=3 uid="uid://b1f3yonajmcth"]
+
+[ext_resource type="Script" uid="uid://u6ipmleg8quq" path="res://scripts/road_generator.gd" id="1_lvrb6"]
+
+[node name="RoadGenerator" type="Node2D" unique_id=1032155224]
+script = ExtResource("1_lvrb6")
+
+[node name="CenterLine" type="Line2D" parent="." unique_id=1389617961]
+
+[node name="RightBoundary" type="Line2D" parent="." unique_id=238815187]
+
+[node name="LeftBoundary" type="Line2D" parent="." unique_id=534034493]
+
+[node name="Road" type="Polygon2D" parent="." unique_id=1978127583]
+color = Color(0.9411765, 0, 0, 0.9411765)
