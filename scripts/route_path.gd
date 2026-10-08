@@ -173,6 +173,28 @@ func get_rotation_at(distance: float) -> float:
 	return get_direction_at(distance).angle() + PI / 2.0
 
 
+# Left-hand normal of the travel direction at `distance`.
+func get_normal_at(distance: float) -> Vector2:
+	var direction: Vector2 = get_direction_at(distance)
+
+	return Vector2(
+		-direction.y,
+		direction.x
+	)
+
+
+# distance → pose in one call.
+func get_pose_at(
+	distance: float,
+	lateral_offset: float = 0.0
+) -> Dictionary:
+	return {
+		"position": get_position_at(distance, lateral_offset),
+		"direction": get_direction_at(distance),
+		"rotation": get_rotation_at(distance)
+	}
+
+
 # ============================================================
 # NEAREST
 # ------------------------------------------------------------

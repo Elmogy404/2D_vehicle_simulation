@@ -99,6 +99,13 @@ var center_points: Array[Vector2] = []
 var left_points: Array[Vector2] = []
 var right_points: Array[Vector2] = []
 
+# Distance-based view of the centerline. Rebuilt on every generation so
+# traffic always follows the current road.
+var route: RoutePath = RoutePath.new()
+
+# Emitted after a road (and its route) has been fully rebuilt.
+signal road_regenerated
+
 var current_angle: float = 0.0
 var current_steer: float = 0.0
 var steer_target: float = 0.0
@@ -130,6 +137,11 @@ func _unhandled_input(event: InputEvent) -> void:
 func get_center_points() -> Array[Vector2]:
 	return center_points.duplicate()
 
+
+func get_route() -> RoutePath:
+	return route
+
+
 func generate_road() -> void:
 	clear_generated_content()
 
@@ -138,11 +150,15 @@ func generate_road() -> void:
 	generate_centerline()
 	generate_boundaries()
 
+	route.build(center_points)
+
 	build_road_polygon()
 	build_lane_markings()
 	build_boundary_visuals()
 	build_debug_centerline()
 	build_collisions()
+
+	road_regenerated.emit()
 
 
 func regenerate() -> void:
@@ -660,15 +676,17 @@ func clear_generated_content() -> void:
 	if collisions:
 		_clear_children(collisions)
 
+# ============================================================
+# SPAWN POSE
+# ============================================================
+
 func get_spawn_position() -> Vector2:
 	if center_points.is_empty():
 		return Vector2.ZERO
 
-# ============================================================
-# spawn position and rotation
-# ============================================================
-
 	return center_points[0]
+
+
 func get_spawn_rotation() -> float:
 	if center_points.size() < 2:
 		return 0.0

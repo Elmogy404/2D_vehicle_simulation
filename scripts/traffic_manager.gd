@@ -18,17 +18,32 @@ extends Node2D
 
 # ============================================================
 # LANES
+# ------------------------------------------------------------
+# Lane geometry is derived from the road so that the lanes
+# always fit inside the drivable area:
+#
+#   lane_width = road_width / (2 * lanes_per_direction)
+#
+# With right-hand traffic, lanes on the right half of the
+# road travel WITH the centerline and lanes on the left half
+# travel AGAINST it.
 # ============================================================
 
 @export_category("Lanes")
 
-@export var lane_count: int = 2
+## Lanes in each direction (1 = one lane each way).
+@export var lanes_per_direction: int = 1
 
-@export var lane_width: float = 90.0
+## Vehicle dimensions used to keep spawn points and lane
+## offsets physically valid.
+@export var vehicle_width: float = 80.0
+@export var vehicle_length: float = 144.0
 
-@export var lane_spacing: int = 8
+## Distance along the route where the first cars spawn.
+@export var first_spawn_distance: float = 400.0
 
-@export var first_spawn_index: int = 8
+## Distance between spawn points of cars in the same lane.
+@export var spawn_spacing: float = 500.0
 
 
 # ============================================================
@@ -50,7 +65,12 @@ var rng := RandomNumberGenerator.new()
 
 var road_generator: Node
 
-var centerline: Array[Vector2] = []
+# Lane descriptors: { id, offset, direction }
+var lanes: Array[Dictionary] = []
+
+# Shared distance-based view of the road, owned by the
+# road generator so regeneration replaces it in one place.
+var route: RoutePath
 
 var traffic_cars: Array[Node] = []
 
@@ -71,6 +91,13 @@ func _ready() -> void:
 	await get_tree().process_frame
 
 
+	# Regenerating the road must rebuild traffic too.
+	road_generator.connect(
+		&"road_regenerated",
+		regenerate
+	)
+
+
 	spawn_traffic()
 
 
@@ -87,15 +114,61 @@ func setup_rng() -> void:
 
 
 # ============================================================
+# LANES
+# ============================================================
+
+func lane_count() -> int:
+	return maxi(lanes_per_direction, 1) * 2
+
+
+func build_lanes() -> void:
+	lanes.clear()
+
+	var road_width: float = road_generator.get("road_width")
+
+	var width_per_lane: float = (
+		road_width / float(lane_count())
+	)
+
+	if vehicle_width > width_per_lane:
+		push_warning(
+			"TrafficManager: vehicle width %.0f exceeds lane width %.0f."
+			% [vehicle_width, width_per_lane]
+		)
+
+	var id: int = 0
+
+	for direction in [1.0, -1.0]:
+		for i in range(maxi(lanes_per_direction, 1)):
+			# Distance from the centerline to this lane's
+			# center. Direction +1 drives on the right half.
+			var offset: float = (
+				direction
+				*
+				(i + 0.5)
+				*
+				width_per_lane
+			)
+
+			lanes.append({
+				"id": id,
+				"offset": offset,
+				"direction": direction
+			})
+
+			id += 1
+
+
+# ============================================================
 # SPAWN
 # ============================================================
 
 func spawn_traffic() -> void:
 	clear_traffic()
 
-	centerline = road_generator.get_center_points()
+	route = road_generator.get_route()
 
-	if centerline.size() < 20:
+	if route == null or not route.is_valid():
 		push_warning("Road is too short for traffic.")
 		return
 
@@ -104,25 +177,29 @@ func spawn_traffic() -> void:
 		return
 
 
+	build_lanes()
+
+
 	for i in range(number_of_cars):
-		var lane_id: int = i % lane_count
+		var lane: Dictionary = lanes[i % lanes.size()]
 
-		var cars_in_lane: int = int(i / lane_count)
+		var cars_in_lane: int = int(i / lanes.size())
 
-		var spawn_index: int = (
-			first_spawn_index
+		var spawn_distance: float = (
+			first_spawn_distance
 			+
-			cars_in_lane * lane_spacing
+			cars_in_lane * spawn_spacing
 		)
 
-
-		if spawn_index >= centerline.size() - 2:
-			break
+		spawn_distance = fmod(spawn_distance, route.length)
 
 
-		var lane_path: Array[Vector2] = build_lane_path(
-			lane_id
-		)
+		if not is_spawn_clear(
+			spawn_distance,
+			float(lane["offset"]),
+			int(lane["id"])
+		):
+			continue
 
 
 		var car: Node = traffic_car_scene.instantiate()
@@ -138,10 +215,12 @@ func spawn_traffic() -> void:
 
 		if car.has_method("setup"):
 			car.setup(
-				lane_path,
-				spawn_index,
-				speed,
-				lane_id
+				route,
+				int(lane["id"]),
+				float(lane["offset"]),
+				float(lane["direction"]),
+				spawn_distance,
+				speed
 			)
 
 			traffic_cars.append(car)
@@ -154,79 +233,113 @@ func spawn_traffic() -> void:
 			car.queue_free()
 
 
-# ============================================================
-# BUILD LANE
-# ============================================================
-
-func build_lane_path(
-	lane_id: int
-) -> Array[Vector2]:
-	var lane_path: Array[Vector2] = []
-
-
-	# --------------------------------------------------------
-	# Calculate lateral offset
-	# --------------------------------------------------------
-
-	var offset_from_center := (
-		(
-			float(lane_id)
-			-
-			(float(lane_count - 1) / 2.0)
-		)
-		*
-		lane_width
+# Never drop a car on top of another one. Vehicles in OTHER
+# lanes are already separated sideways, so they only matter
+# when the bodies would actually touch.
+func is_spawn_clear(
+	spawn_distance: float,
+	spawn_offset: float,
+	spawn_lane_id: int
+) -> bool:
+	var spawn_point: Vector2 = route.get_position_at(
+		spawn_distance,
+		spawn_offset
 	)
 
+	var same_lane_gap: float = vehicle_length + 20.0
 
-	for i in range(centerline.size()):
-		var direction: Vector2
+	for other in get_tree().get_nodes_in_group("traffic"):
+		if not is_instance_valid(other):
+			continue
 
+		if other.get("route") != route:
+			continue
 
-		if i == 0:
-			direction = (
-				centerline[1]
-				-
-				centerline[0]
-			)
+		if int(other.get("lane_id")) == spawn_lane_id:
+			if along_route_gap(
+				spawn_distance,
+				float(other.get("progress"))
+			) < same_lane_gap:
+				return false
 
+		elif spawn_point.distance_to(
+			other.global_position
+		) < vehicle_width:
+			return false
 
-		elif i == centerline.size() - 1:
-			direction = (
-				centerline[i]
-				-
-				centerline[i - 1]
-			)
+	# The ego vehicle must not be overwritten either. It is
+	# matched to a lane by its actual lateral position.
+	var ego: Node = get_tree().get_first_node_in_group(
+		"vehicle_obstacle"
+	)
 
-
-		else:
-			direction = (
-				centerline[i + 1]
-				-
-				centerline[i - 1]
-			)
-
-
-		direction = direction.normalized()
-
-
-		var normal := Vector2(
-			- direction.y,
-			direction.x
+	if ego != null and is_instance_valid(ego):
+		var near: Dictionary = route.nearest(
+			ego.global_position
 		)
 
-
-		var point := (
-			centerline[i]
-			+
-			normal * offset_from_center
+		var lane_center: Vector2 = route.get_position_at(
+			float(near["progress"]),
+			spawn_offset
 		)
 
+		var shares_lane: bool = (
+			lane_center.distance_to(ego.global_position)
+			<= 75.0
+		)
 
-		lane_path.append(point)
+		if shares_lane:
+			if along_route_gap(
+				spawn_distance,
+				float(near["progress"])
+			) < same_lane_gap:
+				return false
+
+		elif spawn_point.distance_to(ego.global_position) < vehicle_width:
+			return false
+
+	return true
 
 
-	return lane_path
+# Shortest distance along the route between two progress
+# values (the route loops, so both ways are considered).
+func along_route_gap(a: float, b: float) -> float:
+	var gap: float = absf(a - b)
+	return minf(gap, route.length - gap)
+
+
+# ============================================================
+# EGO SPAWN
+# ------------------------------------------------------------
+# The ego starts inside the first lane travelling with the
+# centerline, ahead of the NPC spawn area.
+# ============================================================
+
+func get_ego_spawn_pose() -> Dictionary:
+	route = road_generator.get_route()
+
+	if route == null or not route.is_valid():
+		return {
+			"position": road_generator.get_spawn_position(),
+			"rotation": road_generator.get_spawn_rotation()
+		}
+
+	build_lanes()
+
+	var lane: Dictionary = lanes[0]
+
+	var distance: float = minf(
+		first_spawn_distance * 0.5,
+		route.length * 0.5
+	)
+
+	return {
+		"position": route.get_position_at(
+			distance,
+			float(lane["offset"])
+		),
+		"rotation": route.get_rotation_at(distance)
+	}
 
 
 # ============================================================
@@ -236,6 +349,11 @@ func build_lane_path(
 func clear_traffic() -> void:
 	for car in traffic_cars:
 		if is_instance_valid(car):
+			# Remove from the tree immediately so spawn
+			# clearance checks cannot see dying cars.
+			if car.get_parent() != null:
+				car.get_parent().remove_child(car)
+
 			car.queue_free()
 
 

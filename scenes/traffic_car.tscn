@@ -9,7 +9,7 @@ size = Vector2(80, 144)
 [node name="TrafficCar" type="CharacterBody2D" unique_id=1479023007]
 script = ExtResource("1_w8xan")
 
-[node name="Sprite2D" type="Sprite2D" parent="." unique_id=812780949 groups=["traffic"]]
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=812780949]
 texture = ExtResource("1_l7tx4")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=2045937080]

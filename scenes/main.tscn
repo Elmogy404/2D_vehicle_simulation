@@ -5,7 +5,9 @@
 [ext_resource type="PackedScene" uid="uid://ddvgxgidq8qdj" path="res://scenes/EgoVehicle.tscn" id="2_0wfyh"]
 [ext_resource type="Script" uid="uid://kebqn3apsgjn" path="res://scripts/traffic_manager.gd" id="4_jyhfs"]
 [ext_resource type="PackedScene" uid="uid://cvyjs0ow5ghwi" path="res://scenes/traffic_car.tscn" id="5_tbgi4"]
-[ext_resource type="Script" uid="uid://dyfgipywc5v65" path="res://scenes/debug_camera.gd" id="6_tefeu"]
+[ext_resource type="Script" uid="uid://dyfgipywc5v65" path="res://scripts/debug_camera.gd" id="6_tefeu"]
+[ext_resource type="Script" path="res://scripts/speed_hud.gd" id="7_hud01"]
+[ext_resource type="Script" path="res://scripts/game_over.gd" id="8_gmov"]
 
 [node name="Main" type="Node2D" unique_id=580353184]
 script = ExtResource("1_sugp2")
@@ -20,3 +22,9 @@ traffic_car_scene = ExtResource("5_tbgi4")
 
 [node name="DebugCamera" type="Camera2D" parent="." unique_id=1470967347]
 script = ExtResource("6_tefeu")
+
+[node name="SpeedHud" type="CanvasLayer" parent="."]
+script = ExtResource("7_hud01")
+
+[node name="GameOver" type="CanvasLayer" parent="."]
+script = ExtResource("8_gmov")
