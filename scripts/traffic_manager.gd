@@ -36,8 +36,8 @@ extends Node2D
 
 ## Vehicle dimensions used to keep spawn points and lane
 ## offsets physically valid.
-@export var vehicle_width: float = 80.0
-@export var vehicle_length: float = 144.0
+@export var vehicle_width: float = 62.0
+@export var vehicle_length: float = 122.0
 
 ## Distance along the route where the first cars spawn.
 @export var first_spawn_distance: float = 400.0
@@ -73,6 +73,18 @@ var lanes: Array[Dictionary] = []
 var route: RoutePath
 
 var traffic_cars: Array[Node] = []
+
+const TRAFFIC_TEXTURES: Array[Texture2D] = [
+	preload("res://assets/random cars/car_blue_1.png"),
+	preload("res://assets/random cars/car_blue_2.png"),
+	preload("res://assets/random cars/car_blue_3.png")
+]
+
+const TRAFFIC_BODY_SIZES: Array[Vector2] = [
+	Vector2(62.0, 122.0),
+	Vector2(62.0, 108.0),
+	Vector2(62.0, 122.0)
+]
 
 
 # ============================================================
@@ -205,6 +217,17 @@ func spawn_traffic() -> void:
 		var car: Node = traffic_car_scene.instantiate()
 
 		add_child(car)
+
+		# Visual variety is deterministic and collider geometry follows the
+		# selected sprite. It consumes no RNG, so seeded speed assignments stay
+		# backward-compatible.
+		var variant: int = i % TRAFFIC_TEXTURES.size()
+
+		if car.has_method("configure_visual"):
+			car.configure_visual(
+				TRAFFIC_TEXTURES[variant],
+				TRAFFIC_BODY_SIZES[variant]
+			)
 
 
 		var speed: float = rng.randf_range(

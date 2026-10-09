@@ -8,11 +8,20 @@
 [ext_resource type="Script" uid="uid://dyfgipywc5v65" path="res://scripts/debug_camera.gd" id="6_tefeu"]
 [ext_resource type="Script" path="res://scripts/speed_hud.gd" id="7_hud01"]
 [ext_resource type="Script" path="res://scripts/game_over.gd" id="8_gmov"]
+[ext_resource type="Script" path="res://scripts/environment_state.gd" id="9_state"]
+[ext_resource type="Script" path="res://scripts/traffic_light_manager.gd" id="10_lights"]
+[ext_resource type="Script" path="res://scripts/pedestrian_manager.gd" id="11_pedestrians"]
 
 [node name="Main" type="Node2D" unique_id=580353184]
 script = ExtResource("1_sugp2")
 
 [node name="RoadGenerator" parent="." unique_id=1032155224 instance=ExtResource("1_o5qli")]
+
+[node name="TrafficLightManager" type="Node2D" parent="."]
+script = ExtResource("10_lights")
+
+[node name="PedestrianManager" type="Node2D" parent="."]
+script = ExtResource("11_pedestrians")
 
 [node name="EgoVehicle" parent="." unique_id=882894357 instance=ExtResource("2_0wfyh")]
 
@@ -28,3 +37,6 @@ script = ExtResource("7_hud01")
 
 [node name="GameOver" type="CanvasLayer" parent="."]
 script = ExtResource("8_gmov")
+
+[node name="EnvironmentState" type="Node" parent="."]
+script = ExtResource("9_state")

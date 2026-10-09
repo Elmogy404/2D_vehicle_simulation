@@ -23,8 +23,14 @@ extends CharacterBody2D
 @export_category("Following")
 
 @export var detection_distance: float = 320.0
-@export var safe_distance: float = 180.0
-@export var slow_distance: float = 280.0
+@export var safe_distance: float = 28.0
+@export var slow_distance: float = 220.0
+
+## Desired seconds of separation from the rear bumper ahead.
+@export var time_headway: float = 1.25
+
+## Extra braking multiplier when the available stopping distance is small.
+@export var emergency_brake_multiplier: float = 1.8
 
 ## How close another vehicle may be to this lane's re-entry
 ## point before this vehicle is allowed to loop back.
@@ -57,8 +63,8 @@ extends CharacterBody2D
 
 @export_category("Geometry")
 
-@export var vehicle_length: float = 144.0
-@export var vehicle_width: float = 80.0
+@export var vehicle_length: float = 122.0
+@export var vehicle_width: float = 62.0
 
 ## A foreign vehicle counts as sharing this lane when its
 ## center is within this distance of the lane centerline.
@@ -127,6 +133,27 @@ func setup(
 	snap_to_route()
 
 
+func configure_visual(texture: Texture2D, body_size: Vector2) -> void:
+	vehicle_width = body_size.x
+	vehicle_length = body_size.y
+
+	var sprite := get_node_or_null("Sprite2D") as Sprite2D
+	var collider := get_node_or_null("CollisionShape2D") as CollisionShape2D
+
+	if sprite != null:
+		sprite.texture = texture
+
+	if collider != null:
+		var rectangle := collider.shape as RectangleShape2D
+
+		if rectangle != null:
+			# Shapes loaded from a PackedScene can share resources. Duplicate before
+			# applying per-vehicle dimensions.
+			rectangle = rectangle.duplicate() as RectangleShape2D
+			rectangle.size = body_size
+			collider.shape = rectangle
+
+
 # Place the car exactly on its lane and face it forward.
 func snap_to_route() -> void:
 	if route == null or not route.is_valid():
@@ -157,12 +184,16 @@ func _physics_process(delta: float) -> void:
 
 	target_speed = curve_speed_limit()
 
-	var leader_gap: float = gap_to_leader()
+	var leader: Dictionary = leader_state()
+	var leader_gap: float = float(leader["gap"])
 
 	if leader_gap < detection_distance:
 		target_speed = minf(
 			target_speed,
-			follow_speed(leader_gap)
+			follow_speed(
+				leader_gap,
+				float(leader["speed"])
+			)
 		)
 
 	if not reentry_clear():
@@ -170,6 +201,8 @@ func _physics_process(delta: float) -> void:
 			target_speed,
 			stop_before_route_end_speed()
 		)
+
+	target_speed = minf(target_speed, traffic_light_speed_limit())
 
 	# --------------------------------------------------------
 	# Acceleration / braking
@@ -183,10 +216,15 @@ func _physics_process(delta: float) -> void:
 		)
 
 	else:
+		var applied_braking: float = braking
+
+		if leader_gap < safe_distance:
+			applied_braking *= emergency_brake_multiplier
+
 		speed = move_toward(
 			speed,
 			target_speed,
-			braking * delta
+			applied_braking * delta
 		)
 
 	# --------------------------------------------------------
@@ -248,6 +286,11 @@ func _physics_process(delta: float) -> void:
 	velocity = direction * speed
 
 	move_and_slide()
+
+	# A physical contact must remove forward drive immediately. This prevents
+	# NPCs from continuously pushing another car or vibrating against a wall.
+	if get_slide_collision_count() > 0:
+		speed = 0.0
 
 	sync_progress()
 
@@ -392,20 +435,63 @@ func curve_speed_limit() -> float:
 	return cruise_speed * lerpf(1.0, curve_speed_factor, t)
 
 
-func follow_speed(gap: float) -> float:
+func follow_speed(gap: float, leader_speed: float = 0.0) -> float:
 	if gap <= safe_distance:
 		return 0.0
 
-	if gap >= slow_distance:
+	var desired_gap: float = safe_distance + speed * time_headway
+
+	if gap >= maxf(slow_distance, desired_gap):
 		return cruise_speed
 
-	var t: float = (
-		(gap - safe_distance)
-		/
-		maxf(slow_distance - safe_distance, 0.001)
+	# Match the leader, then use remaining gap error to close smoothly. The
+	# stopping-distance cap prevents a fast follower from arriving too quickly.
+	var proportional_speed: float = (
+		leader_speed
+		+ (gap - desired_gap) / maxf(time_headway, 0.1)
+	)
+	var stopping_speed: float = sqrt(
+		2.0 * braking * maxf(gap - safe_distance, 0.0)
 	)
 
-	return cruise_speed * clampf(t, 0.0, 1.0)
+	return clampf(
+		minf(proportional_speed, stopping_speed),
+		0.0,
+		cruise_speed
+	)
+
+
+func traffic_light_speed_limit() -> float:
+	var nearest_gap: float = INF
+	var nearest_light: Node
+
+	for candidate in get_tree().get_nodes_in_group("traffic_lights"):
+		var light := candidate as Node
+
+		if light == null or light.route != route:
+			continue
+
+		var center_gap: float = (
+			(light.progress - progress) * travel_direction
+		)
+		var bumper_gap: float = center_gap - vehicle_length * 0.5
+
+		if bumper_gap >= 0.0 and bumper_gap < nearest_gap:
+			nearest_gap = bumper_gap
+			nearest_light = light
+
+	if nearest_light == null:
+		return cruise_speed
+
+	if not nearest_light.requires_stop(speed, nearest_gap, braking):
+		return cruise_speed
+
+	if nearest_gap <= safe_distance:
+		return 0.0
+
+	return sqrt(
+		2.0 * braking * maxf(nearest_gap - safe_distance, 0.0)
+	)
 
 
 # ============================================================
@@ -417,7 +503,14 @@ func follow_speed(gap: float) -> float:
 # ============================================================
 
 func gap_to_leader() -> float:
-	var best: float = INF
+	return float(leader_state()["gap"])
+
+
+## Returns bumper-to-bumper gap and leader speed. Using physical lengths fixes
+## the previous mismatch where following decisions used center distances.
+func leader_state() -> Dictionary:
+	var best_gap: float = INF
+	var best_speed: float = 0.0
 
 	for other in get_tree().get_nodes_in_group("traffic"):
 		if not is_instance_valid(other) or other == self:
@@ -429,16 +522,19 @@ func gap_to_leader() -> float:
 		if other.get("lane_id") != lane_id:
 			continue
 
-		var gap: float = (
+		var center_gap: float = (
 			(float(other.get("progress")) - progress)
 			*
 			travel_direction
 		)
+		var other_length: float = float(other.get("vehicle_length"))
+		var gap: float = center_gap - (vehicle_length + other_length) * 0.5
 
-		if gap <= 0.0 or gap >= best:
+		if center_gap <= 0.0 or gap >= best_gap:
 			continue
 
-		best = gap
+		best_gap = gap
+		best_speed = float(other.get("speed"))
 
 	# The ego vehicle is not part of the traffic system but
 	# still occupies a lane.
@@ -451,10 +547,21 @@ func gap_to_leader() -> float:
 			ego.global_position
 		)
 
-		if ego_gap > 0.0 and ego_gap < best:
-			best = ego_gap
+		if ego_gap < best_gap:
+			best_gap = ego_gap
+			best_speed = float(ego.get("current_speed"))
 
-	return best
+	for pedestrian in get_tree().get_nodes_in_group("pedestrians"):
+		if not is_instance_valid(pedestrian):
+			continue
+
+		var pedestrian_gap: float = gap_to_position(pedestrian.global_position)
+
+		if pedestrian_gap < best_gap:
+			best_gap = pedestrian_gap
+			best_speed = 0.0
+
+	return {"gap": best_gap, "speed": best_speed}
 
 
 func gap_to_position(position: Vector2) -> float:
@@ -474,16 +581,22 @@ func gap_to_position(position: Vector2) -> float:
 	if lane_center.distance_to(position) > lane_match_distance:
 		return INF
 
-	var gap: float = (
+	var center_gap: float = (
 		(other_progress - progress)
 		*
 		travel_direction
 	)
 
-	if gap <= 0.0:
+	if center_gap <= 0.0:
 		return INF
 
-	return gap
+	var other_length: float = 122.0
+	var ego: Node = get_tree().get_first_node_in_group("vehicle_obstacle")
+
+	if ego != null and ego.has_method("get_speed_kmh"):
+		other_length = float(ego.get("vehicle_length"))
+
+	return center_gap - (vehicle_length + other_length) * 0.5
 
 
 # All route progress values of vehicles sharing this lane

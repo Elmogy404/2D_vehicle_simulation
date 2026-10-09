@@ -33,6 +33,7 @@ var cumulative: PackedFloat64Array = PackedFloat64Array()
 # make cars jitter on a 60 unit segment road).
 var tangents: PackedVector2Array = PackedVector2Array()
 var normals: PackedVector2Array = PackedVector2Array()
+var half_widths: PackedFloat32Array = PackedFloat32Array()
 
 var length: float = 0.0
 
@@ -45,11 +46,15 @@ func _init(new_points: Array[Vector2] = []) -> void:
 	build(new_points)
 
 
-func build(new_points: Array[Vector2]) -> void:
+func build(
+	new_points: Array[Vector2],
+	new_half_widths: PackedFloat32Array = PackedFloat32Array()
+) -> void:
 	points.clear()
 	cumulative.clear()
 	tangents.clear()
 	normals.clear()
+	half_widths.clear()
 
 	length = 0.0
 
@@ -67,6 +72,12 @@ func build(new_points: Array[Vector2]) -> void:
 
 		points.append(point)
 		cumulative.append(length)
+		var source_index: int = mini(half_widths.size(), new_half_widths.size() - 1)
+
+		if new_half_widths.is_empty():
+			half_widths.append(100.0)
+		else:
+			half_widths.append(new_half_widths[source_index])
 
 
 	if points.size() < 2:
@@ -181,6 +192,16 @@ func get_normal_at(distance: float) -> Vector2:
 		-direction.y,
 		direction.x
 	)
+
+
+func get_half_width_at(distance: float) -> float:
+	if not is_valid() or half_widths.size() != points.size():
+		return 100.0
+
+	var clamped := clampf(distance, 0.0, length)
+	var segment := _segment_for(clamped)
+	var t := _segment_t(segment, clamped)
+	return lerpf(half_widths[segment], half_widths[segment + 1], t)
 
 
 # distance → pose in one call.

@@ -10,6 +10,16 @@ extends Node2D
 @export var road_length: float = 4000.0
 @export var segment_length: float = 60.0
 
+@export_category("Road Complexity")
+@export var minimum_road_width: float = 190.0
+@export var maximum_road_width: float = 280.0
+@export var width_change_smoothing: float = 0.16
+@export_range(1, 6, 1) var intersection_count: int = 3
+@export var cross_street_length: float = 700.0
+@export var cross_street_width: float = 190.0
+@export_range(1, 5, 1) var turnaround_count: int = 2
+@export var turnaround_width: float = 360.0
+
 
 # ============================================================
 # CURVATURE
@@ -19,13 +29,13 @@ extends Node2D
 
 ## Maximum heading change per segment (degrees). Automatically limited so the
 ## inner edge of the road can never fold over itself.
-@export_range(1.0, 45.0, 1.0) var max_turn_angle: float = 12.0
+@export_range(1.0, 45.0, 1.0) var max_turn_angle: float = 16.0
 
 ## How quickly steering follows its target (0 = never, 1 = instantly).
 @export_range(0.01, 1.0, 0.01) var turn_smoothing: float = 0.25
 
 ## Maximum heading (degrees) away from the starting direction.
-@export var max_total_turn: float = 90.0
+@export var max_total_turn: float = 160.0
 
 ## Number of segments at the start that stay perfectly straight.
 @export var min_straight_segments: int = 3
@@ -98,6 +108,9 @@ var rng := RandomNumberGenerator.new()
 var center_points: Array[Vector2] = []
 var left_points: Array[Vector2] = []
 var right_points: Array[Vector2] = []
+var road_widths: PackedFloat32Array = PackedFloat32Array()
+var intersection_indices: PackedInt32Array = PackedInt32Array()
+var turnaround_indices: PackedInt32Array = PackedInt32Array()
 
 # Distance-based view of the centerline. Rebuilt on every generation so
 # traffic always follows the current road.
@@ -148,17 +161,36 @@ func generate_road() -> void:
 	setup_rng()
 
 	generate_centerline()
+	generate_road_features()
 	generate_boundaries()
 
-	route.build(center_points)
+	var route_half_widths := PackedFloat32Array()
+
+	for width in road_widths:
+		route_half_widths.append(width * 0.5)
+
+	route.build(center_points, route_half_widths)
 
 	build_road_polygon()
+	build_cross_streets()
 	build_lane_markings()
 	build_boundary_visuals()
 	build_debug_centerline()
 	build_collisions()
 
 	road_regenerated.emit()
+
+
+func get_intersection_indices() -> PackedInt32Array:
+	return intersection_indices.duplicate()
+
+
+func get_turnaround_indices() -> PackedInt32Array:
+	return turnaround_indices.duplicate()
+
+
+func get_width_profile() -> PackedFloat32Array:
+	return road_widths.duplicate()
 
 
 func regenerate() -> void:
@@ -240,6 +272,67 @@ func generate_centerline() -> void:
 		center_points.append(current_pos)
 
 
+func generate_road_features() -> void:
+	road_widths.clear()
+	intersection_indices.clear()
+	turnaround_indices.clear()
+
+	if center_points.is_empty():
+		return
+
+	# Smooth random width targets create readable transitions instead of sudden
+	# polygon steps. The first spawn area remains at the nominal width.
+	var current_width: float = clampf(
+		road_width,
+		minimum_road_width,
+		maximum_road_width
+	)
+	var target_width: float = current_width
+
+	for i in range(center_points.size()):
+		if i > min_straight_segments and i % 7 == 0:
+			target_width = rng.randf_range(minimum_road_width, maximum_road_width)
+
+		current_width = lerpf(current_width, target_width, width_change_smoothing)
+		road_widths.append(current_width)
+
+	var usable_start: int = maxi(8, int(600.0 / maxf(segment_length, 1.0)))
+	var usable_end: int = center_points.size() - usable_start - 1
+
+	if usable_end <= usable_start:
+		return
+
+	# Place features in evenly divided seeded slots, preventing overlaps while
+	# still producing different layouts for different seeds.
+	for feature in range(intersection_count):
+		var ratio := (float(feature) + 1.0) / (float(intersection_count) + 1.0)
+		var base := int(round(lerpf(float(usable_start), float(usable_end), ratio)))
+		var jitter := rng.randi_range(-2, 2)
+		intersection_indices.append(clampi(base + jitter, usable_start, usable_end))
+
+	for feature in range(turnaround_count):
+		var ratio := (float(feature) + 0.5) / float(maxi(turnaround_count, 1))
+		var base := int(round(lerpf(float(usable_start), float(usable_end), ratio)))
+		var chosen := clampi(base + rng.randi_range(-2, 2), usable_start, usable_end)
+
+		# Keep turnaround bulbs away from intersection openings.
+		for intersection_index in intersection_indices:
+			if absi(chosen - intersection_index) < 5:
+				chosen = clampi(chosen + 6, usable_start, usable_end)
+
+		turnaround_indices.append(chosen)
+
+		for offset in range(-3, 4):
+			var index := chosen + offset
+
+			if index >= 0 and index < road_widths.size():
+				var influence := 1.0 - absf(float(offset)) / 4.0
+				road_widths[index] = maxf(
+					road_widths[index],
+					lerpf(road_widths[index], turnaround_width, influence)
+				)
+
+
 # ============================================================
 # ANGLE GENERATION
 # ============================================================
@@ -275,7 +368,7 @@ func calculate_next_angle(index: int) -> float:
 			turn_limit
 		)
 
-		steer_hold = rng.randi_range(4, 10)
+		steer_hold = rng.randi_range(3, 8)
 
 	# Smooth steering -> no abrupt direction changes
 	current_steer = lerpf(current_steer, steer_target, turn_smoothing)
@@ -422,8 +515,6 @@ func generate_boundaries() -> void:
 	if count < 2:
 		return
 
-	var half_width := road_width * 0.5
-
 	for i in range(count):
 		var normal: Vector2
 		var miter_scale := 1.0
@@ -448,6 +539,11 @@ func generate_boundaries() -> void:
 			# Mitering keeps the road width constant through curves
 			miter_scale = 1.0 / maxf(normal.dot(n1), 0.5)
 
+		var half_width: float = (
+			road_widths[i] * 0.5
+			if i < road_widths.size()
+			else road_width * 0.5
+		)
 		var offset := normal * half_width * miter_scale
 
 		left_points.append(center_points[i] + offset)
@@ -499,6 +595,85 @@ func build_road_polygon() -> void:
 
 	road.polygon = polygon
 	road.color = Color(0.12, 0.12, 0.12)
+
+
+func build_cross_streets() -> void:
+	var container := _get_or_create("CrossStreets", "Node2D")
+	_clear_children(container)
+
+	for intersection_index in intersection_indices:
+		if intersection_index <= 0 or intersection_index >= center_points.size() - 1:
+			continue
+
+		var center := center_points[intersection_index]
+		var tangent := (
+			center_points[intersection_index + 1]
+			- center_points[intersection_index - 1]
+		).normalized()
+		var across := Vector2(-tangent.y, tangent.x)
+		var half_length := cross_street_length * 0.5
+		var half_width := cross_street_width * 0.5
+		var polygon := Polygon2D.new()
+		polygon.color = Color(0.115, 0.115, 0.115)
+		polygon.polygon = PackedVector2Array([
+			center - across * half_length - tangent * half_width,
+			center + across * half_length - tangent * half_width,
+			center + across * half_length + tangent * half_width,
+			center - across * half_length + tangent * half_width
+		])
+		container.add_child(polygon)
+
+		var markings := Line2D.new()
+		markings.width = line_width
+		markings.default_color = Color.WHITE
+		markings.add_point(center - across * half_length)
+		markings.add_point(center + across * half_length)
+		container.add_child(markings)
+
+		_build_cross_street_walls(
+			container, center, tangent, across, half_length, half_width,
+			road_widths[intersection_index] * 0.5
+		)
+
+
+func _build_cross_street_walls(
+	container: Node,
+	center: Vector2,
+	tangent: Vector2,
+	across: Vector2,
+	half_length: float,
+	half_width: float,
+	main_half_width: float
+) -> void:
+	var body := StaticBody2D.new()
+	body.collision_layer = 1
+	body.collision_mask = 2
+	container.add_child(body)
+	var opening := main_half_width + 20.0
+
+	for side in [-1.0, 1.0]:
+		for direction in [-1.0, 1.0]:
+			var start: Vector2 = center + across * opening * float(direction) + tangent * half_width * float(side)
+			var end: Vector2 = center + across * half_length * float(direction) + tangent * half_width * float(side)
+			_add_wall_segment(body, start, end)
+
+	_add_wall_segment(body, center - across * half_length - tangent * half_width, center - across * half_length + tangent * half_width)
+	_add_wall_segment(body, center + across * half_length - tangent * half_width, center + across * half_length + tangent * half_width)
+
+
+func _add_wall_segment(body: StaticBody2D, start: Vector2, end: Vector2) -> void:
+	var segment := end - start
+
+	if segment.length_squared() < 1.0:
+		return
+
+	var rectangle := RectangleShape2D.new()
+	rectangle.size = Vector2(segment.length(), boundary_thickness)
+	var shape := CollisionShape2D.new()
+	shape.shape = rectangle
+	shape.position = (start + end) * 0.5
+	shape.rotation = segment.angle()
+	body.add_child(shape)
 
 
 # ============================================================
@@ -616,6 +791,9 @@ func build_collisions() -> void:
 
 	var walls := StaticBody2D.new()
 	walls.name = "Walls"
+	# Layer 1: world geometry. It only needs to collide with vehicles.
+	walls.collision_layer = 1
+	walls.collision_mask = 2
 	container.add_child(walls)
 
 	# Walls sit just outside the road edge so the drivable width stays
@@ -633,6 +811,9 @@ func create_collision_chain(
 		return
 
 	for i in range(points.size() - 1):
+		if _segment_is_intersection_opening(i):
+			continue
+
 		var start := points[i]
 		var end := points[i + 1]
 
@@ -660,6 +841,14 @@ func create_collision_chain(
 		body.add_child(shape)
 
 
+func _segment_is_intersection_opening(segment_index: int) -> bool:
+	for intersection_index in intersection_indices:
+		if absi(segment_index - intersection_index) <= 1:
+			return true
+
+	return false
+
+
 # ============================================================
 # CLEAR
 # ============================================================
@@ -675,6 +864,11 @@ func clear_generated_content() -> void:
 
 	if collisions:
 		_clear_children(collisions)
+
+	var cross_streets := get_node_or_null("CrossStreets")
+
+	if cross_streets:
+		_clear_children(cross_streets)
 
 # ============================================================
 # SPAWN POSE

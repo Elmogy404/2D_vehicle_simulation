@@ -4,12 +4,18 @@
 [ext_resource type="Texture2D" uid="uid://dmd7rsd6j3in5" path="res://assets/ai_car.png" id="1_hdtj7"]
 [ext_resource type="Script" uid="uid://ikjvqso7i6an" path="res://scripts/sensor_rig.gd" id="3_66r1o"]
 [ext_resource type="Script" uid="uid://ch6f6rp5h20mm" path="res://scripts/camera_controller.gd" id="3_lm4l8"]
+[ext_resource type="Script" path="res://scripts/keyboard_vehicle_controller.gd" id="4_keyboard"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_en6eq"]
-size = Vector2(80, 144)
+size = Vector2(62, 122)
 
 [node name="EgoVehicle" type="CharacterBody2D" unique_id=882894357]
+collision_layer = 2
+collision_mask = 7
 script = ExtResource("1_arvns")
+
+[node name="KeyboardController" type="Node" parent="."]
+script = ExtResource("4_keyboard")
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=279866242]
 texture = ExtResource("1_hdtj7")

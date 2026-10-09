@@ -111,7 +111,8 @@ func update_sensors() -> void:
 
 
 		# Detect collision objects
-		query.collision_mask = 1
+		# World boundaries, vehicles, and pedestrians.
+		query.collision_mask = 7
 
 		# Don't detect the ego vehicle
 		query.exclude = [

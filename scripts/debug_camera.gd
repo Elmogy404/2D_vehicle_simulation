@@ -16,7 +16,7 @@ extends Camera2D
 
 
 var target_zoom: float = 1.0
-var debug_mode: bool = true
+var debug_mode: bool = false
 
 var ego_camera: Camera2D
 
@@ -29,8 +29,9 @@ func _ready() -> void:
 
 	target_zoom = zoom.x
 
-	# Start with debug camera active
-	make_current()
+	# Gameplay starts by following the ego vehicle. The free debug camera is
+	# still available with C for inspecting the generated environment.
+	ego_camera.make_current()
 
 
 func _process(delta: float) -> void:

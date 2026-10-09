@@ -133,11 +133,97 @@ func run_all() -> void:
 	traffic = main.get_node("TrafficManager")
 	hud = main.get_node("SpeedHud")
 	game_over = main.get_node("GameOver")
+	var light_manager: Node = main.get_node("TrafficLightManager")
+	var pedestrian_manager: Node = main.get_node("PedestrianManager")
+	var environment_state: Node = main.get_node("EnvironmentState")
 
 	check(
 		hud != null and game_over != null,
 		"HUD and Game Over nodes exist"
 	)
+
+	check(
+		environment_state != null,
+		"read-only environment state exists"
+	)
+
+	check(
+		ego.collision_layer == 2 and ego.collision_mask == 7,
+		"ego detects world, vehicles, and pedestrians"
+	)
+
+	var ego_camera: Camera2D = ego.get_node("Camera2D")
+
+	check(ego_camera.is_current(), "gameplay camera follows the ego by default")
+	check(
+		ego_camera.position_smoothing_enabled,
+		"ego camera uses position smoothing"
+	)
+
+	# --------------------------------------------------------
+	# SEEDED TRAFFIC LIGHTS
+	# --------------------------------------------------------
+	print("== Traffic lights ==")
+
+	var light_snapshot: PackedFloat32Array = light_manager.progress_snapshot()
+
+	check(
+		light_snapshot.size() >= int(light_manager.get("minimum_lights")),
+		"random traffic lights were generated"
+	)
+
+	light_manager.regenerate()
+
+	check(
+		light_manager.progress_snapshot() == light_snapshot,
+		"same light seed reproduces identical positions"
+	)
+
+	# --------------------------------------------------------
+	# COMPLEX ROAD + PEDESTRIANS
+	# --------------------------------------------------------
+	print("== Road features and pedestrians ==")
+
+	var widths: PackedFloat32Array = road.get_width_profile()
+	var width_min: float = INF
+	var width_max: float = 0.0
+
+	for width in widths:
+		width_min = minf(width_min, width)
+		width_max = maxf(width_max, width)
+
+	check(width_max - width_min > 25.0, "road widens and narrows")
+	check(
+		road.get_intersection_indices().size() == int(road.get("intersection_count")),
+		"seeded intersections were generated"
+	)
+	check(
+		road.get_turnaround_indices().size() == int(road.get("turnaround_count")),
+		"seeded U-turn areas were generated"
+	)
+	check(
+		road.get_node("CrossStreets").get_child_count() > 0,
+		"intersections have traversable cross-street geometry"
+	)
+
+	var pedestrians: Array = pedestrian_manager.get("pedestrians")
+	var expected_pedestrians: int = (
+		road.get_intersection_indices().size()
+		* int(pedestrian_manager.get("pedestrians_per_intersection"))
+	)
+
+	check(
+		pedestrians.size() == expected_pedestrians,
+		"pedestrians generated at every intersection"
+	)
+
+	var pedestrian_layers_ok: bool = true
+
+	for pedestrian in pedestrians:
+		if pedestrian.collision_layer != 4 or pedestrian.collision_mask != 3:
+			pedestrian_layers_ok = false
+
+	check(pedestrian_layers_ok, "pedestrians use dedicated collision layers")
 
 	# --------------------------------------------------------
 	# CHANGE 1: variable NPC speeds
@@ -147,6 +233,88 @@ func run_all() -> void:
 	var cars: Array[Node] = traffic_cars()
 
 	check(cars.size() == 8, "traffic spawned (%d cars)" % cars.size())
+
+	var ego_rectangle := (
+		ego.get_node("CollisionShape2D").shape as RectangleShape2D
+	)
+
+	check(
+		ego_rectangle != null
+		and ego_rectangle.size == Vector2(62.0, 122.0),
+		"ego hitbox fits inside its 70x131 sprite"
+	)
+
+	var variants: Dictionary = {}
+	var npc_hitboxes_fit: bool = true
+
+	for car in cars:
+		var sprite: Sprite2D = car.get_node("Sprite2D")
+		var shape := (
+			car.get_node("CollisionShape2D").shape as RectangleShape2D
+		)
+
+		variants[sprite.texture.resource_path] = true
+
+		if shape == null:
+			npc_hitboxes_fit = false
+			continue
+
+		if shape.size.x > sprite.texture.get_width():
+			npc_hitboxes_fit = false
+
+		if shape.size.y > sprite.texture.get_height():
+			npc_hitboxes_fit = false
+
+		if not is_equal_approx(
+			shape.size.y,
+			float(car.get("vehicle_length"))
+		):
+			npc_hitboxes_fit = false
+
+	check(npc_hitboxes_fit, "NPC hitboxes fit their visible sprites")
+	check(variants.size() == 3, "NPC traffic uses 3 deterministic variants")
+
+	if not cars.is_empty():
+		var sample_car: Node = cars[0]
+		var safe_gap: float = float(sample_car.get("safe_distance"))
+		var cruise: float = float(sample_car.get("cruise_speed"))
+		var stopped_target: float = sample_car.follow_speed(
+			safe_gap,
+			0.0
+		)
+		var open_target: float = sample_car.follow_speed(
+			1000.0,
+			0.0
+		)
+
+		check(stopped_target == 0.0, "NPC stops at its minimum bumper gap")
+		check(
+			is_equal_approx(open_target, cruise),
+			"NPC returns to cruise speed with an open road"
+		)
+
+		var lights: Array = light_manager.get("lights")
+
+		if not lights.is_empty():
+			var test_light: Node = lights[0]
+			test_light.force_state(2)
+			sample_car.set("progress", float(test_light.get("progress")) - 100.0)
+			sample_car.set("travel_direction", 1.0)
+			sample_car.set("speed", 100.0)
+			var red_limit: float = sample_car.traffic_light_speed_limit()
+
+			check(red_limit < cruise, "NPC brakes for a red traffic light")
+			test_light.force_state(0)
+			check(
+				is_equal_approx(
+					sample_car.traffic_light_speed_limit(),
+					cruise
+				),
+				"NPC proceeds through a green traffic light"
+			)
+
+			traffic.regenerate()
+			cars = traffic_cars()
 
 	var cruises: Array[float] = sorted_cruises(cars)
 
@@ -320,6 +488,57 @@ func run_all() -> void:
 		v_boost > 0.0,
 		"accelerate input produced motion (%.0f)" % v_boost
 	)
+
+	# --------------------------------------------------------
+	# CONTROLLER-NEUTRAL COMMANDS + BICYCLE STEERING
+	# --------------------------------------------------------
+	print("== Vehicle command interface ==")
+
+	reset_straight_drive()
+	ego.set_control(1.0, 0.0, 0.0)
+	await wait_physics(12)
+
+	check(
+		ego.velocity.length() > 30.0,
+		"external throttle command drives the vehicle"
+	)
+
+	var rotation_before: float = ego.rotation
+	ego.set_control(1.0, 0.0, 1.0)
+	await wait_physics(15)
+
+	check(
+		absf(angle_difference(rotation_before, ego.rotation)) > 0.01,
+		"bicycle steering changes heading while moving"
+	)
+
+	ego.set_control(0.0, 1.0, 0.0)
+	var command_brake_start: float = ego.current_speed
+	await wait_physics(5)
+
+	check(
+		ego.current_speed < command_brake_start,
+		"external brake command reduces speed"
+	)
+
+	var state: Dictionary = environment_state.get_state()
+
+	check(
+		state.has("speed")
+		and state.has("heading_error")
+		and state.has("lane_center_error")
+		and state.has("road_curvature")
+		and state.has("sensor_distances"),
+		"environment exposes vehicle, lane, road, and sensor state"
+	)
+
+	check(
+		float(state.get("normalized_speed", -1.0)) >= 0.0
+		and float(state.get("normalized_speed", 2.0)) <= 1.0,
+		"environment speed is normalized"
+	)
+
+	reset_drive_state()
 
 	# --------------------------------------------------------
 	# CHANGE 3: speed HUD

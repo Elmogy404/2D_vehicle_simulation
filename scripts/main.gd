@@ -4,6 +4,8 @@ extends Node2D
 @onready var road_generator = $RoadGenerator
 @onready var ego_vehicle = $EgoVehicle
 @onready var traffic_manager = $TrafficManager
+@onready var traffic_light_manager = $TrafficLightManager
+@onready var pedestrian_manager = $PedestrianManager
 
 
 func _ready() -> void:
@@ -30,3 +32,5 @@ func restart_simulation() -> void:
 	place_ego()
 
 	traffic_manager.regenerate()
+	traffic_light_manager.regenerate()
+	pedestrian_manager.regenerate()
