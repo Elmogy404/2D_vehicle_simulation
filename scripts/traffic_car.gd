@@ -90,6 +90,7 @@ var progress: float = 0.0
 var travel_direction: float = 1.0
 
 var lane_id: int = 0
+var lane_index: int = 0
 var lane_offset: float = 0.0
 
 
@@ -109,6 +110,7 @@ func _ready() -> void:
 func setup(
 	new_route: RoutePath,
 	new_lane_id: int,
+	new_lane_index: int,
 	new_lane_offset: float,
 	new_travel_direction: float,
 	start_progress: float,
@@ -116,6 +118,7 @@ func setup(
 ) -> void:
 	route = new_route
 	lane_id = new_lane_id
+	lane_index = new_lane_index
 	lane_offset = new_lane_offset
 
 	travel_direction = 1.0 if new_travel_direction >= 0.0 else -1.0
@@ -160,6 +163,7 @@ func snap_to_route() -> void:
 		velocity = Vector2.ZERO
 		return
 
+	lane_offset = route.get_lane_offset_at(progress, lane_index, travel_direction)
 	global_position = route.get_position_at(progress, lane_offset)
 
 	rotation = (
@@ -257,9 +261,14 @@ func _physics_process(delta: float) -> void:
 		else:
 			target_distance = maxf(target_distance, exit)
 
+	var target_lane_offset := route.get_lane_offset_at(
+		target_distance,
+		lane_index,
+		travel_direction
+	)
 	var target_point: Vector2 = route.get_position_at(
 		target_distance,
-		lane_offset
+		target_lane_offset
 	)
 
 	var to_target: Vector2 = target_point - global_position
@@ -293,6 +302,7 @@ func _physics_process(delta: float) -> void:
 		speed = 0.0
 
 	sync_progress()
+	lane_offset = route.get_lane_offset_at(progress, lane_index, travel_direction)
 
 
 # ============================================================
@@ -471,8 +481,9 @@ func traffic_light_speed_limit() -> float:
 		if light == null or light.route != route:
 			continue
 
+		var stop_progress: float = light.stop_progress_for(travel_direction)
 		var center_gap: float = (
-			(light.progress - progress) * travel_direction
+			(stop_progress - progress) * travel_direction
 		)
 		var bumper_gap: float = center_gap - vehicle_length * 0.5
 
@@ -519,7 +530,21 @@ func leader_state() -> Dictionary:
 		if other.get("route") != route:
 			continue
 
-		if other.get("lane_id") != lane_id:
+		if float(other.get("travel_direction")) != travel_direction:
+			continue
+
+		var other_offset := route.get_lane_offset_at(
+			float(other.get("progress")),
+			int(other.get("lane_index")),
+			travel_direction
+		)
+		var own_offset := route.get_lane_offset_at(
+			float(other.get("progress")),
+			lane_index,
+			travel_direction
+		)
+
+		if absf(other_offset - own_offset) > lane_match_distance:
 			continue
 
 		var center_gap: float = (
@@ -611,7 +636,21 @@ func same_lane_progresses() -> Array[float]:
 		if other.get("route") != route:
 			continue
 
-		if other.get("lane_id") != lane_id:
+		if float(other.get("travel_direction")) != travel_direction:
+			continue
+
+		var other_offset := route.get_lane_offset_at(
+			float(other.get("progress")),
+			int(other.get("lane_index")),
+			travel_direction
+		)
+		var own_offset := route.get_lane_offset_at(
+			float(other.get("progress")),
+			lane_index,
+			travel_direction
+		)
+
+		if absf(other_offset - own_offset) > lane_match_distance:
 			continue
 
 		values.append(float(other.get("progress")))

@@ -32,7 +32,7 @@ extends Node2D
 @export_category("Lanes")
 
 ## Lanes in each direction (1 = one lane each way).
-@export var lanes_per_direction: int = 1
+@export var lanes_per_direction: int = 3
 
 ## Vehicle dimensions used to keep spawn points and lane
 ## offsets physically valid.
@@ -136,11 +136,7 @@ func lane_count() -> int:
 func build_lanes() -> void:
 	lanes.clear()
 
-	var road_width: float = road_generator.get("road_width")
-
-	var width_per_lane: float = (
-		road_width / float(lane_count())
-	)
+	var width_per_lane: float = float(road_generator.get("lane_width"))
 
 	if vehicle_width > width_per_lane:
 		push_warning(
@@ -165,7 +161,8 @@ func build_lanes() -> void:
 			lanes.append({
 				"id": id,
 				"offset": offset,
-				"direction": direction
+				"direction": direction,
+				"index": i
 			})
 
 			id += 1
@@ -204,14 +201,13 @@ func spawn_traffic() -> void:
 		)
 
 		spawn_distance = fmod(spawn_distance, route.length)
+		var spawn_pose := find_clear_spawn_pose(spawn_distance, lane)
 
-
-		if not is_spawn_clear(
-			spawn_distance,
-			float(lane["offset"]),
-			int(lane["id"])
-		):
+		if spawn_pose.is_empty():
 			continue
+
+		spawn_distance = float(spawn_pose["progress"])
+		var spawn_offset: float = float(spawn_pose["offset"])
 
 
 		var car: Node = traffic_car_scene.instantiate()
@@ -240,7 +236,8 @@ func spawn_traffic() -> void:
 			car.setup(
 				route,
 				int(lane["id"]),
-				float(lane["offset"]),
+				int(lane["index"]),
+				spawn_offset,
 				float(lane["direction"]),
 				spawn_distance,
 				speed
@@ -254,6 +251,40 @@ func spawn_traffic() -> void:
 			)
 
 			car.queue_free()
+
+
+func find_clear_spawn_pose(start_distance: float, lane: Dictionary) -> Dictionary:
+	var candidate := start_distance
+	var step := maxf(float(road_generator.get("segment_length")), 30.0)
+	var attempts := ceili(route.length / step)
+	var lane_index: int = int(lane["index"])
+	var lane_direction: float = float(lane["direction"])
+	var lane_id: int = int(lane["id"])
+
+	for attempt in range(attempts):
+		if route.get_lane_count_at(candidate) > lane_index:
+			var offset := route.get_lane_offset_at(candidate, lane_index, lane_direction)
+
+			if not is_near_intersection(candidate) and is_spawn_clear(
+				candidate,
+				offset,
+				lane_id
+			):
+				return {"progress": candidate, "offset": offset}
+
+		candidate = fposmod(candidate + step, route.length)
+
+	return {}
+
+
+func is_near_intersection(candidate: float) -> bool:
+	for index in road_generator.get_intersection_indices():
+		var feature_progress: float = float(route.cumulative[index])
+
+		if absf(feature_progress - candidate) < vehicle_length * 1.5:
+			return true
+
+	return false
 
 
 # Never drop a car on top of another one. Vehicles in OTHER

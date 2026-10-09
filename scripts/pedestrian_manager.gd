@@ -17,7 +17,7 @@ var rng := RandomNumberGenerator.new()
 func _ready() -> void:
 	road_generator = get_parent().get_node("RoadGenerator")
 	light_manager = get_parent().get_node("TrafficLightManager")
-	road_generator.road_regenerated.connect(regenerate)
+	light_manager.lights_regenerated.connect(regenerate)
 	regenerate()
 
 
@@ -44,7 +44,10 @@ func regenerate() -> void:
 			var pedestrian := PedestrianScript.new() as CharacterBody2D
 			pedestrian.name = "Pedestrian_%02d_%02d" % [intersection_number, pedestrian_index]
 			pedestrian.collision_layer = 4
-			pedestrian.collision_mask = 3
+			# Pedestrians collide with static world geometry but keep walking through
+			# a vehicle after accidental contact. Vehicles still detect their layer,
+			# preventing the mutual CharacterBody deadlock that froze the road.
+			pedestrian.collision_mask = 1
 			add_child(pedestrian)
 			pedestrian.configure(
 				start, finish,

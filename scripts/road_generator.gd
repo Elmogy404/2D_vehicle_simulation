@@ -19,6 +19,10 @@ extends Node2D
 @export var cross_street_width: float = 190.0
 @export_range(1, 5, 1) var turnaround_count: int = 2
 @export var turnaround_width: float = 360.0
+@export_range(1, 3, 1) var minimum_lanes_per_direction: int = 1
+@export_range(1, 3, 1) var maximum_lanes_per_direction: int = 3
+@export var lane_width: float = 90.0
+@export var shoulder_width: float = 10.0
 
 
 # ============================================================
@@ -109,6 +113,7 @@ var center_points: Array[Vector2] = []
 var left_points: Array[Vector2] = []
 var right_points: Array[Vector2] = []
 var road_widths: PackedFloat32Array = PackedFloat32Array()
+var lane_profile: PackedFloat32Array = PackedFloat32Array()
 var intersection_indices: PackedInt32Array = PackedInt32Array()
 var turnaround_indices: PackedInt32Array = PackedInt32Array()
 
@@ -169,7 +174,7 @@ func generate_road() -> void:
 	for width in road_widths:
 		route_half_widths.append(width * 0.5)
 
-	route.build(center_points, route_half_widths)
+	route.build(center_points, route_half_widths, lane_profile, lane_width)
 
 	build_road_polygon()
 	build_cross_streets()
@@ -191,6 +196,10 @@ func get_turnaround_indices() -> PackedInt32Array:
 
 func get_width_profile() -> PackedFloat32Array:
 	return road_widths.duplicate()
+
+
+func get_lane_profile() -> PackedFloat32Array:
+	return lane_profile.duplicate()
 
 
 func regenerate() -> void:
@@ -274,27 +283,22 @@ func generate_centerline() -> void:
 
 func generate_road_features() -> void:
 	road_widths.clear()
+	lane_profile.clear()
 	intersection_indices.clear()
 	turnaround_indices.clear()
 
 	if center_points.is_empty():
 		return
 
-	# Smooth random width targets create readable transitions instead of sudden
-	# polygon steps. The first spawn area remains at the nominal width.
-	var current_width: float = clampf(
-		road_width,
-		minimum_road_width,
-		maximum_road_width
-	)
-	var target_width: float = current_width
-
+	# Real roads keep a lane count for a while, then add or remove one lane at a
+	# time over a finite merge taper. The schedule guarantees useful 1/2/3-lane
+	# sections without making the entire road continuously expand and contract.
+	var last_point := maxi(center_points.size() - 1, 1)
 	for i in range(center_points.size()):
-		if i > min_straight_segments and i % 7 == 0:
-			target_width = rng.randf_range(minimum_road_width, maximum_road_width)
-
-		current_width = lerpf(current_width, target_width, width_change_smoothing)
-		road_widths.append(current_width)
+		var ratio := float(i) / float(last_point)
+		var lanes := _lane_profile_for_ratio(ratio)
+		lane_profile.append(lanes)
+		road_widths.append(lanes * lane_width * 2.0 + shoulder_width * 2.0)
 
 	var usable_start: int = maxi(8, int(600.0 / maxf(segment_length, 1.0)))
 	var usable_end: int = center_points.size() - usable_start - 1
@@ -308,7 +312,13 @@ func generate_road_features() -> void:
 		var ratio := (float(feature) + 1.0) / (float(intersection_count) + 1.0)
 		var base := int(round(lerpf(float(usable_start), float(usable_end), ratio)))
 		var jitter := rng.randi_range(-2, 2)
-		intersection_indices.append(clampi(base + jitter, usable_start, usable_end))
+		intersection_indices.append(
+			_straightest_intersection_near(
+				clampi(base + jitter, usable_start, usable_end),
+				usable_start,
+				usable_end
+			)
+		)
 
 	for feature in range(turnaround_count):
 		var ratio := (float(feature) + 0.5) / float(maxi(turnaround_count, 1))
@@ -333,6 +343,46 @@ func generate_road_features() -> void:
 				)
 
 
+func _lane_profile_for_ratio(ratio: float) -> float:
+	var stages: Array[Vector2] = [
+		Vector2(0.00, 1.0), Vector2(0.12, 1.0),
+		Vector2(0.20, 2.0), Vector2(0.32, 2.0),
+		Vector2(0.40, 3.0), Vector2(0.58, 3.0),
+		Vector2(0.66, 2.0), Vector2(0.76, 2.0),
+		Vector2(0.84, 1.0), Vector2(1.00, 1.0)
+	]
+
+	for i in range(stages.size() - 1):
+		if ratio <= stages[i + 1].x:
+			var span := maxf(stages[i + 1].x - stages[i].x, 0.001)
+			var t := clampf((ratio - stages[i].x) / span, 0.0, 1.0)
+			var smooth_t := t * t * (3.0 - 2.0 * t)
+			return lerpf(stages[i].y, stages[i + 1].y, smooth_t)
+
+	return 1.0
+
+
+func _straightest_intersection_near(base: int, lower: int, upper: int) -> int:
+	var best := base
+	var best_score := INF
+
+	for candidate in range(maxi(lower, base - 7), mini(upper, base + 7) + 1):
+		if candidate <= 0 or candidate >= center_points.size() - 1:
+			continue
+
+		var before := (center_points[candidate] - center_points[candidate - 1]).normalized()
+		var after := (center_points[candidate + 1] - center_points[candidate]).normalized()
+		var curvature := absf(before.angle_to(after))
+		var lane_penalty := maxf(lane_profile[candidate] - 2.0, 0.0) * 0.5
+		var score := curvature + lane_penalty
+
+		if score < best_score:
+			best_score = score
+			best = candidate
+
+	return best
+
+
 # ============================================================
 # ANGLE GENERATION
 # ============================================================
@@ -340,7 +390,13 @@ func generate_road_features() -> void:
 ## Largest heading change per segment that still keeps the inner road edge
 ## valid (the turning radius must stay larger than the road's half width).
 func get_max_turn_per_segment() -> float:
-	var min_radius := maxf(road_width * 0.75, 1.0)
+	var widest_road := (
+		float(maximum_lanes_per_direction) * lane_width * 2.0
+		+ shoulder_width * 2.0
+	)
+	# Keep the inner edge well outside the center of curvature. This is stricter
+	# than merely avoiding a mathematical fold and produces believable bends.
+	var min_radius := maxf(widest_road * 0.9, 420.0)
 	var geometric_limit := rad_to_deg(segment_length / min_radius)
 
 	return minf(max_turn_angle, geometric_limit)
@@ -385,7 +441,11 @@ func calculate_next_angle(index: int) -> float:
 # ============================================================
 
 func get_required_clearance() -> float:
-	return maxf(minimum_segment_distance, road_width + boundary_thickness)
+	var widest_road := (
+		float(maximum_lanes_per_direction) * lane_width * 2.0
+		+ shoulder_width * 2.0
+	)
+	return maxf(minimum_segment_distance, widest_road + boundary_thickness)
 
 
 func is_position_safe(new_position: Vector2) -> bool:
@@ -578,23 +638,26 @@ func _clear_children(node: Node) -> void:
 
 func build_road_polygon() -> void:
 	var road := _get_or_create("Road", "Polygon2D") as Polygon2D
+	road.polygon = PackedVector2Array()
+
+	var surface := _get_or_create("RoadSurface", "Node2D")
+	_clear_children(surface)
 
 	if left_points.size() < 2:
-		road.polygon = PackedVector2Array()
 		return
 
-	var polygon := PackedVector2Array()
-
-	# Left side
-	for point in left_points:
-		polygon.append(point)
-
-	# Right side reversed
-	for i in range(right_points.size() - 1, -1, -1):
-		polygon.append(right_points[i])
-
-	road.polygon = polygon
-	road.color = Color(0.12, 0.12, 0.12)
+	# One convex quad per segment avoids the triangulation artifacts produced by
+	# a single concave polygon when the road widens through a sharp curve.
+	for i in range(left_points.size() - 1):
+		var strip := Polygon2D.new()
+		strip.color = Color(0.12, 0.12, 0.12)
+		strip.polygon = PackedVector2Array([
+			left_points[i],
+			left_points[i + 1],
+			right_points[i + 1],
+			right_points[i]
+		])
+		surface.add_child(strip)
 
 
 func build_cross_streets() -> void:
@@ -623,16 +686,21 @@ func build_cross_streets() -> void:
 		])
 		container.add_child(polygon)
 
-		var markings := Line2D.new()
-		markings.width = line_width
-		markings.default_color = Color.WHITE
-		markings.add_point(center - across * half_length)
-		markings.add_point(center + across * half_length)
-		container.add_child(markings)
+		var main_half_width: float = road_widths[intersection_index] * 0.5
+
+		# Cross-street centerlines stop at the junction instead of cutting through
+		# the intersection conflict area.
+		for direction in [-1.0, 1.0]:
+			var markings := Line2D.new()
+			markings.width = line_width
+			markings.default_color = Color(0.95, 0.72, 0.12)
+			markings.add_point(center + across * half_length * float(direction))
+			markings.add_point(center + across * (main_half_width + 18.0) * float(direction))
+			container.add_child(markings)
 
 		_build_cross_street_walls(
 			container, center, tangent, across, half_length, half_width,
-			road_widths[intersection_index] * 0.5
+			main_half_width
 		)
 
 
@@ -723,12 +791,46 @@ func build_lane_markings() -> void:
 
 		travelled += length
 
+	# White dividers taper in from the shoulder as a lane is added and taper
+	# back out when it merges. Each short segment is convex/render-safe and
+	# follows the same lane profile used by traffic.
+	for direction in [-1.0, 1.0]:
+		for divider_index in range(1, maximum_lanes_per_direction):
+			for i in range(center_points.size() - 1):
+				var profile_a: float = lane_profile[i]
+				var profile_b: float = lane_profile[i + 1]
+
+				if maxf(profile_a, profile_b) <= float(divider_index) + 0.02:
+					continue
+
+				if (i + divider_index) % 2 != 0:
+					continue
+
+				var offset_a := _lane_divider_offset(profile_a, divider_index, float(direction))
+				var offset_b := _lane_divider_offset(profile_b, divider_index, float(direction))
+				var line := Line2D.new()
+				line.width = 3.0
+				line.default_color = Color(0.92, 0.92, 0.92)
+				var from := center_points[i] + route.get_normal_at(float(route.cumulative[i])) * offset_a
+				var full_to := center_points[i + 1] + route.get_normal_at(float(route.cumulative[i + 1])) * offset_b
+				line.add_point(from)
+				line.add_point(from.lerp(full_to, 0.62))
+				container.add_child(line)
+
+
+func _lane_divider_offset(profile: float, divider_index: int, direction: float) -> float:
+	var transition := clampf(float(divider_index + 1) - profile, 0.0, 1.0)
+	return direction * (
+		float(divider_index) * lane_width
+		+ shoulder_width * transition
+	)
+
 
 func _make_dash(from: Vector2, to: Vector2) -> Line2D:
 	var line := Line2D.new()
 
 	line.width = line_width
-	line.default_color = Color.WHITE
+	line.default_color = Color(0.95, 0.72, 0.12)
 	line.begin_cap_mode = Line2D.LINE_CAP_NONE
 	line.end_cap_mode = Line2D.LINE_CAP_NONE
 
@@ -755,7 +857,7 @@ func build_boundary_visuals() -> void:
 	for point in right_points:
 		right_line.add_point(point)
 
-	var edge_color := Color(1.0, 0.85, 0.1)
+	var edge_color := Color(0.92, 0.92, 0.92)
 
 	left_line.width = 5.0
 	right_line.width = 5.0
@@ -869,6 +971,11 @@ func clear_generated_content() -> void:
 
 	if cross_streets:
 		_clear_children(cross_streets)
+
+	var road_surface := get_node_or_null("RoadSurface")
+
+	if road_surface:
+		_clear_children(road_surface)
 
 # ============================================================
 # SPAWN POSE

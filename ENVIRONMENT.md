@@ -39,7 +39,17 @@ This service does not apply controls or change simulation state.
 
 - The ego camera follows the player by default with physics-tick smoothing.
   Press `C` to switch to the free debug camera.
-- The road uses a seeded, smoothly interpolated width profile.
+- The main road uses a seeded profile ranging from one to three lanes per
+  direction. Width, lane centers, and divider markings share the same smooth
+  transition data, producing finite tapered lane additions and merges separated
+  by constant-width road sections.
+- Road asphalt is rendered as independent convex strips to avoid concave
+  polygon triangulation artifacts on wide curves.
+- Curve radius is constrained using the widest possible road section, keeping
+  inside boundaries from folding over on multi-lane bends.
+- Intersections are selected from the straightest nearby route segment. Side
+  road center markings stop before the conflict area, and each travel direction
+  has its own approach stop line.
 - Seeded cross streets create traversable four-way intersection openings.
 - Widened turnaround bulbs provide enough physical road width for U-turns.
 - Traffic signals are placed at generated intersections and use timed
@@ -47,6 +57,9 @@ This service does not apply controls or change simulation state.
 - NPC traffic stops for red signals, handles yellow based on stopping distance,
   and proceeds on green.
 - Seeded pedestrians wait at curbs and cross while vehicle traffic is red.
+- Vehicle spawns search for a valid active lane and avoid intersection conflict
+  zones. Pedestrians ignore vehicle bodies while walking so an accidental
+  overlap cannot deadlock both actors; vehicles still detect and stop for them.
 - Vehicle sensors detect road boundaries, traffic, and pedestrians.
 
 ## Physics layers

@@ -11,6 +11,7 @@ const TrafficLightScript = preload("res://scripts/traffic_light.gd")
 var road_generator: Node
 var lights: Array[Node] = []
 var rng := RandomNumberGenerator.new()
+signal lights_regenerated
 
 
 func _ready() -> void:
@@ -54,8 +55,15 @@ func regenerate() -> void:
 		var light: Node = TrafficLightScript.new()
 		light.name = "TrafficLight_%02d" % index
 		add_child(light)
-		light.configure(route, light_progress, rng.randf() * light.cycle_duration())
+		light.configure(
+			route,
+			light_progress,
+			rng.randf() * light.cycle_duration(),
+			float(road_generator.get("cross_street_width"))
+		)
 		lights.append(light)
+
+	lights_regenerated.emit()
 
 
 func clear_lights() -> void:

@@ -193,6 +193,28 @@ func run_all() -> void:
 		width_max = maxf(width_max, width)
 
 	check(width_max - width_min > 25.0, "road widens and narrows")
+
+	var lane_profile: PackedFloat32Array = road.get_lane_profile()
+	var minimum_lanes: int = 99
+	var maximum_lanes: int = 0
+
+	for lane_value in lane_profile:
+		minimum_lanes = mini(minimum_lanes, maxi(1, int(floor(lane_value + 0.05))))
+		maximum_lanes = maxi(maximum_lanes, maxi(1, int(floor(lane_value + 0.05))))
+
+	check(
+		minimum_lanes == 1 and maximum_lanes == 3,
+		"main road transitions between 1 and 3 lanes per direction"
+	)
+	check(
+		road.get_node("Road").polygon.is_empty(),
+		"legacy concave road polygon is disabled"
+	)
+	check(
+		road.get_node("RoadSurface").get_child_count()
+		== road.get_center_points().size() - 1,
+		"road surface uses artifact-free convex strips"
+	)
 	check(
 		road.get_intersection_indices().size() == int(road.get("intersection_count")),
 		"seeded intersections were generated"
@@ -220,10 +242,32 @@ func run_all() -> void:
 	var pedestrian_layers_ok: bool = true
 
 	for pedestrian in pedestrians:
-		if pedestrian.collision_layer != 4 or pedestrian.collision_mask != 3:
+		if pedestrian.collision_layer != 4 or pedestrian.collision_mask != 1:
 			pedestrian_layers_ok = false
 
 	check(pedestrian_layers_ok, "pedestrians use dedicated collision layers")
+
+	if not pedestrians.is_empty():
+		var pedestrian: CharacterBody2D = pedestrians[0]
+		var linked_light: Node = pedestrian.get("traffic_light")
+		linked_light.force_state(2)
+		var blocker := CharacterBody2D.new()
+		blocker.collision_layer = 2
+		blocker.collision_mask = 0
+		var blocker_shape := CollisionShape2D.new()
+		var blocker_rectangle := RectangleShape2D.new()
+		blocker_rectangle.size = Vector2(50.0, 80.0)
+		blocker_shape.shape = blocker_rectangle
+		blocker.add_child(blocker_shape)
+		main.add_child(blocker)
+		blocker.global_position = pedestrian.global_position
+		var pedestrian_start: Vector2 = pedestrian.global_position
+		await wait_physics(5)
+		check(
+			pedestrian.global_position.distance_to(pedestrian_start) > 1.0,
+			"pedestrian clears accidental vehicle overlap without deadlocking"
+		)
+		blocker.queue_free()
 
 	# --------------------------------------------------------
 	# CHANGE 1: variable NPC speeds
@@ -298,8 +342,11 @@ func run_all() -> void:
 		if not lights.is_empty():
 			var test_light: Node = lights[0]
 			test_light.force_state(2)
-			sample_car.set("progress", float(test_light.get("progress")) - 100.0)
 			sample_car.set("travel_direction", 1.0)
+			sample_car.set(
+				"progress",
+				test_light.stop_progress_for(1.0) - 100.0
+			)
 			sample_car.set("speed", 100.0)
 			var red_limit: float = sample_car.traffic_light_speed_limit()
 
@@ -317,6 +364,17 @@ func run_all() -> void:
 			cars = traffic_cars()
 
 	var cruises: Array[float] = sorted_cruises(cars)
+	var used_lane_indices: Dictionary = {}
+	var spawns_avoid_intersections: bool = true
+
+	for car in cars:
+		used_lane_indices[int(car.get("lane_index"))] = true
+
+		if traffic.is_near_intersection(float(car.get("progress"))):
+			spawns_avoid_intersections = false
+
+	check(used_lane_indices.size() == 3, "NPCs use all three lane levels")
+	check(spawns_avoid_intersections, "NPCs do not spawn inside intersections")
 
 	var distinct: Dictionary = {}
 

@@ -34,6 +34,8 @@ var cumulative: PackedFloat64Array = PackedFloat64Array()
 var tangents: PackedVector2Array = PackedVector2Array()
 var normals: PackedVector2Array = PackedVector2Array()
 var half_widths: PackedFloat32Array = PackedFloat32Array()
+var lane_profile: PackedFloat32Array = PackedFloat32Array()
+var lane_width: float = 90.0
 
 var length: float = 0.0
 
@@ -48,13 +50,17 @@ func _init(new_points: Array[Vector2] = []) -> void:
 
 func build(
 	new_points: Array[Vector2],
-	new_half_widths: PackedFloat32Array = PackedFloat32Array()
+	new_half_widths: PackedFloat32Array = PackedFloat32Array(),
+	new_lane_profile: PackedFloat32Array = PackedFloat32Array(),
+	new_lane_width: float = 90.0
 ) -> void:
 	points.clear()
 	cumulative.clear()
 	tangents.clear()
 	normals.clear()
 	half_widths.clear()
+	lane_profile.clear()
+	lane_width = new_lane_width
 
 	length = 0.0
 
@@ -78,6 +84,11 @@ func build(
 			half_widths.append(100.0)
 		else:
 			half_widths.append(new_half_widths[source_index])
+
+		if new_lane_profile.is_empty():
+			lane_profile.append(1.0)
+		else:
+			lane_profile.append(new_lane_profile[source_index])
 
 
 	if points.size() < 2:
@@ -202,6 +213,33 @@ func get_half_width_at(distance: float) -> float:
 	var segment := _segment_for(clamped)
 	var t := _segment_t(segment, clamped)
 	return lerpf(half_widths[segment], half_widths[segment + 1], t)
+
+
+func get_lane_profile_at(distance: float) -> float:
+	if not is_valid() or lane_profile.size() != points.size():
+		return 1.0
+
+	var clamped := clampf(distance, 0.0, length)
+	var segment := _segment_for(clamped)
+	var t := _segment_t(segment, clamped)
+	return lerpf(lane_profile[segment], lane_profile[segment + 1], t)
+
+
+func get_lane_count_at(distance: float) -> int:
+	return maxi(1, int(floor(get_lane_profile_at(distance) + 0.05)))
+
+
+## Lane index 0 is the innermost lane. When an outer lane ends, its center
+## converges smoothly into the next inner lane instead of disappearing.
+func get_lane_offset_at(
+	distance: float,
+	lane_index: int,
+	travel_direction: float
+) -> float:
+	var profile := get_lane_profile_at(distance)
+	var effective_index := minf(float(maxi(lane_index, 0)), maxf(profile - 1.0, 0.0))
+	var side := 1.0 if travel_direction >= 0.0 else -1.0
+	return side * (effective_index + 0.5) * lane_width
 
 
 # distance → pose in one call.

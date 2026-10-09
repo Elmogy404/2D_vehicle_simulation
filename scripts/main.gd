@@ -33,4 +33,3 @@ func restart_simulation() -> void:
 
 	traffic_manager.regenerate()
 	traffic_light_manager.regenerate()
-	pedestrian_manager.regenerate()
