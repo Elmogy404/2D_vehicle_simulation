@@ -14,6 +14,7 @@ extends CanvasLayer
 var ego: Node
 
 var speed_label: Label
+var gear_label: Label
 
 
 func _ready() -> void:
@@ -31,6 +32,9 @@ func _process(_delta: float) -> void:
 	speed_label.text = "%d km/h" % roundi(
 		ego.get_speed_kmh()
 	)
+
+	if gear_label != null and ego.has_method("get_gear_label"):
+		gear_label.text = "GEAR  %s" % ego.get_gear_label()
 
 
 # ============================================================
@@ -122,3 +126,18 @@ func _build_interface() -> void:
 	speed_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	labels.add_child(speed_label)
+
+
+	gear_label = Label.new()
+
+	gear_label.name = "Gear"
+	gear_label.text = "GEAR  N"
+	gear_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	gear_label.add_theme_font_size_override("font_size", 18)
+	gear_label.add_theme_color_override(
+		"font_color",
+		Color(0.72, 0.88, 1.0)
+	)
+	gear_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	labels.add_child(gear_label)

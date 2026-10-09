@@ -1,5 +1,7 @@
 extends Node2D
 
+const ROAD_NETWORK := preload("res://scripts/road_network.gd")
+
 # ============================================================
 # ROAD
 # ============================================================
@@ -14,7 +16,7 @@ extends Node2D
 @export var minimum_road_width: float = 190.0
 @export var maximum_road_width: float = 280.0
 @export var width_change_smoothing: float = 0.16
-@export_range(1, 6, 1) var intersection_count: int = 3
+@export_range(3, 6, 1) var intersection_count: int = 4
 @export var cross_street_length: float = 700.0
 @export var cross_street_width: float = 190.0
 @export_range(1, 5, 1) var turnaround_count: int = 2
@@ -116,6 +118,9 @@ var road_widths: PackedFloat32Array = PackedFloat32Array()
 var lane_profile: PackedFloat32Array = PackedFloat32Array()
 var intersection_indices: PackedInt32Array = PackedInt32Array()
 var turnaround_indices: PackedInt32Array = PackedInt32Array()
+var intersection_types: PackedStringArray = PackedStringArray()
+var branch_sides: PackedInt32Array = PackedInt32Array()
+var road_network: RefCounted = ROAD_NETWORK.new()
 
 # Distance-based view of the centerline. Rebuilt on every generation so
 # traffic always follows the current road.
@@ -160,6 +165,10 @@ func get_route() -> RoutePath:
 	return route
 
 
+func get_road_network() -> RefCounted:
+	return road_network
+
+
 func generate_road() -> void:
 	clear_generated_content()
 
@@ -175,6 +184,7 @@ func generate_road() -> void:
 		route_half_widths.append(width * 0.5)
 
 	route.build(center_points, route_half_widths, lane_profile, lane_width)
+	road_network.build(get_map_paths())
 
 	build_road_polygon()
 	build_cross_streets()
@@ -188,6 +198,74 @@ func generate_road() -> void:
 
 func get_intersection_indices() -> PackedInt32Array:
 	return intersection_indices.duplicate()
+
+
+func get_intersection_types() -> PackedStringArray:
+	return intersection_types.duplicate()
+
+
+func get_branch_sides() -> PackedInt32Array:
+	return branch_sides.duplicate()
+
+
+## Centerlines used by the minimap and future route graph. The first path is
+## always the arterial; later paths are its one-lane branches and roundabouts.
+func get_map_paths() -> Array[PackedVector2Array]:
+	var paths: Array[PackedVector2Array] = [PackedVector2Array(center_points)]
+
+	for feature in range(intersection_indices.size()):
+		var index := intersection_indices[feature]
+		if index <= 0 or index >= center_points.size() - 1:
+			continue
+
+		var center := center_points[index]
+		var tangent := (center_points[index + 1] - center_points[index - 1]).normalized()
+		var across := Vector2(-tangent.y, tangent.x)
+		for side in _branch_directions(feature):
+			var outward := across * side
+			var endpoint: Vector2 = center + outward * cross_street_length * 0.5
+			var branch_endpoint := endpoint
+			if intersection_types[feature] == "roundabout":
+				branch_endpoint = endpoint - outward * 105.0
+			var branch := PackedVector2Array()
+			for step in range(7):
+				branch.append(center.lerp(branch_endpoint, float(step) / 6.0))
+			paths.append(branch)
+
+			if intersection_types[feature] == "roundabout":
+				var ring := PackedVector2Array()
+				for step in range(25):
+					var angle := (-outward).angle() + TAU * float(step) / 24.0
+					ring.append(endpoint + Vector2.from_angle(angle) * 105.0)
+				paths.append(ring)
+				for exit_side in [-1.0, 1.0]:
+					var exit_direction: Vector2 = tangent * exit_side
+					var exit_path := PackedVector2Array()
+					var exit_start := endpoint + exit_direction * 105.0
+					var exit_end := endpoint + exit_direction * 300.0
+					for exit_step in range(5):
+						exit_path.append(exit_start.lerp(exit_end, float(exit_step) / 4.0))
+					paths.append(exit_path)
+
+	return paths
+
+
+func get_map_bounds() -> Rect2:
+	var has_point := false
+	var minimum := Vector2.ZERO
+	var maximum := Vector2.ZERO
+
+	for path in get_map_paths():
+		for point in path:
+			if not has_point:
+				minimum = point
+				maximum = point
+				has_point = true
+			else:
+				minimum = minimum.min(point)
+				maximum = maximum.max(point)
+
+	return Rect2(minimum - Vector2(160.0, 160.0), maximum - minimum + Vector2(320.0, 320.0))
 
 
 func get_turnaround_indices() -> PackedInt32Array:
@@ -286,6 +364,8 @@ func generate_road_features() -> void:
 	lane_profile.clear()
 	intersection_indices.clear()
 	turnaround_indices.clear()
+	intersection_types.clear()
+	branch_sides.clear()
 
 	if center_points.is_empty():
 		return
@@ -312,13 +392,30 @@ func generate_road_features() -> void:
 		var ratio := (float(feature) + 1.0) / (float(intersection_count) + 1.0)
 		var base := int(round(lerpf(float(usable_start), float(usable_end), ratio)))
 		var jitter := rng.randi_range(-2, 2)
-		intersection_indices.append(
-			_straightest_intersection_near(
-				clampi(base + jitter, usable_start, usable_end),
-				usable_start,
-				usable_end
-			)
+		var chosen_intersection := _straightest_intersection_near(
+			clampi(base + jitter, usable_start, usable_end),
+			usable_start,
+			usable_end
 		)
+		for previous_intersection in intersection_indices:
+			if absi(chosen_intersection - previous_intersection) < 6:
+				chosen_intersection = clampi(previous_intersection + 6, usable_start, usable_end)
+		intersection_indices.append(chosen_intersection)
+
+		# A compact training map always contains the important junction classes.
+		# Their exact locations and T/roundabout side stay seeded.
+		if feature == 0:
+			intersection_types.append("t_junction")
+			branch_sides.append(_safest_branch_side(chosen_intersection))
+		elif feature == 1:
+			intersection_types.append("four_way")
+			branch_sides.append(0)
+		elif feature == 2:
+			intersection_types.append("roundabout")
+			branch_sides.append(_safest_branch_side(chosen_intersection))
+		else:
+			intersection_types.append("t_junction")
+			branch_sides.append(_safest_branch_side(chosen_intersection))
 
 	for feature in range(turnaround_count):
 		var ratio := (float(feature) + 0.5) / float(maxi(turnaround_count, 1))
@@ -360,6 +457,52 @@ func _lane_profile_for_ratio(ratio: float) -> float:
 			return lerpf(stages[i].y, stages[i + 1].y, smooth_t)
 
 	return 1.0
+
+
+func _safest_branch_side(intersection_index: int) -> int:
+	var tangent := (
+		center_points[intersection_index + 1]
+		- center_points[intersection_index - 1]
+	).normalized()
+	var across := Vector2(-tangent.y, tangent.x)
+	var preferred := -1 if rng.randi_range(0, 1) == 0 else 1
+	var best_side := preferred
+	var best_clearance := -INF
+
+	for candidate_side in [-1, 1]:
+		var endpoint := (
+			center_points[intersection_index]
+			+ across * float(candidate_side) * cross_street_length * 0.5
+		)
+		var clearance := INF
+		# Ignore the arterial immediately around the junction; it is the intended
+		# connection. Everything else must remain away from the terminal bulb.
+		for point_index in range(center_points.size()):
+			if absi(point_index - intersection_index) <= 7:
+				continue
+			clearance = minf(clearance, endpoint.distance_to(center_points[point_index]))
+
+		# Also avoid endpoints already assigned to earlier map pieces.
+		for previous_feature in range(branch_sides.size()):
+			var previous_index := intersection_indices[previous_feature]
+			var previous_tangent := (
+				center_points[previous_index + 1]
+				- center_points[previous_index - 1]
+			).normalized()
+			var previous_across := Vector2(-previous_tangent.y, previous_tangent.x)
+			for previous_side in _branch_directions(previous_feature):
+				var previous_endpoint := (
+					center_points[previous_index]
+					+ previous_across * previous_side * cross_street_length * 0.5
+				)
+				clearance = minf(clearance, endpoint.distance_to(previous_endpoint))
+
+		if clearance > best_clearance + 0.01 \
+		or (is_equal_approx(clearance, best_clearance) and candidate_side == preferred):
+			best_clearance = clearance
+			best_side = candidate_side
+
+	return best_side
 
 
 func _straightest_intersection_near(base: int, lower: int, upper: int) -> int:
@@ -664,7 +807,8 @@ func build_cross_streets() -> void:
 	var container := _get_or_create("CrossStreets", "Node2D")
 	_clear_children(container)
 
-	for intersection_index in intersection_indices:
+	for feature in range(intersection_indices.size()):
+		var intersection_index := intersection_indices[feature]
 		if intersection_index <= 0 or intersection_index >= center_points.size() - 1:
 			continue
 
@@ -676,40 +820,56 @@ func build_cross_streets() -> void:
 		var across := Vector2(-tangent.y, tangent.x)
 		var half_length := cross_street_length * 0.5
 		var half_width := cross_street_width * 0.5
-		var polygon := Polygon2D.new()
-		polygon.color = Color(0.115, 0.115, 0.115)
-		polygon.polygon = PackedVector2Array([
-			center - across * half_length - tangent * half_width,
-			center + across * half_length - tangent * half_width,
-			center + across * half_length + tangent * half_width,
-			center - across * half_length + tangent * half_width
-		])
-		container.add_child(polygon)
-
 		var main_half_width: float = road_widths[intersection_index] * 0.5
 
-		# Cross-street centerlines stop at the junction instead of cutting through
-		# the intersection conflict area.
-		for direction in [-1.0, 1.0]:
+		for direction in _branch_directions(feature):
+			var endpoint: Vector2 = center + across * half_length * direction
+			var polygon := Polygon2D.new()
+			polygon.color = Color(0.115, 0.115, 0.115)
+			polygon.polygon = PackedVector2Array([
+				center - tangent * half_width,
+				endpoint - tangent * half_width,
+				endpoint + tangent * half_width,
+				center + tangent * half_width
+			])
+			container.add_child(polygon)
+
+			# Cross-street centerlines stop at the junction instead of cutting through
+			# the intersection conflict area.
 			var markings := Line2D.new()
 			markings.width = line_width
 			markings.default_color = Color(0.95, 0.72, 0.12)
-			markings.add_point(center + across * half_length * float(direction))
-			markings.add_point(center + across * (main_half_width + 18.0) * float(direction))
+			markings.add_point(endpoint)
+			markings.add_point(center + across * (main_half_width + 18.0) * direction)
 			container.add_child(markings)
 
-		_build_cross_street_walls(
-			container, center, tangent, across, half_length, half_width,
-			main_half_width
-		)
+			var outward := across * direction
+			var wall_endpoint := endpoint
+			if intersection_types[feature] == "roundabout":
+				wall_endpoint -= outward * cross_street_width * 0.92 * 0.72
+			_build_branch_walls(
+				container, center, wall_endpoint, tangent, outward,
+				half_width, main_half_width
+			)
+
+			if intersection_types[feature] == "roundabout":
+				_build_roundabout(container, endpoint, outward, tangent)
+			else:
+				_build_cul_de_sac(container, endpoint, outward, tangent)
 
 
-func _build_cross_street_walls(
+func _branch_directions(feature: int) -> Array[float]:
+	if feature < 0 or feature >= branch_sides.size() or branch_sides[feature] == 0:
+		return [-1.0, 1.0]
+	return [float(branch_sides[feature])]
+
+
+func _build_branch_walls(
 	container: Node,
 	center: Vector2,
+	endpoint: Vector2,
 	tangent: Vector2,
-	across: Vector2,
-	half_length: float,
+	outward: Vector2,
 	half_width: float,
 	main_half_width: float
 ) -> void:
@@ -720,13 +880,146 @@ func _build_cross_street_walls(
 	var opening := main_half_width + 20.0
 
 	for side in [-1.0, 1.0]:
-		for direction in [-1.0, 1.0]:
-			var start: Vector2 = center + across * opening * float(direction) + tangent * half_width * float(side)
-			var end: Vector2 = center + across * half_length * float(direction) + tangent * half_width * float(side)
-			_add_wall_segment(body, start, end)
+		var start: Vector2 = center + outward * opening + tangent * half_width * side
+		var end: Vector2 = endpoint + tangent * half_width * side
+		_add_wall_segment(body, start, end)
 
-	_add_wall_segment(body, center - across * half_length - tangent * half_width, center - across * half_length + tangent * half_width)
-	_add_wall_segment(body, center + across * half_length - tangent * half_width, center + across * half_length + tangent * half_width)
+
+func _build_cul_de_sac(
+	container: Node,
+	center: Vector2,
+	outward: Vector2,
+	tangent: Vector2
+) -> void:
+	var radius := cross_street_width * 0.68
+	var bulb := Polygon2D.new()
+	bulb.color = Color(0.115, 0.115, 0.115)
+	bulb.polygon = _circle_points(center, radius, 24)
+	container.add_child(bulb)
+
+	var body := StaticBody2D.new()
+	body.collision_layer = 1
+	body.collision_mask = 2
+	container.add_child(body)
+	_add_round_boundary(body, center, radius, outward, tangent, true)
+
+
+func _build_roundabout(
+	container: Node,
+	center: Vector2,
+	outward: Vector2,
+	tangent: Vector2
+) -> void:
+	var outer_radius := cross_street_width * 0.92
+	var island_radius := cross_street_width * 0.34
+	var apron := Polygon2D.new()
+	apron.color = Color(0.115, 0.115, 0.115)
+	apron.polygon = _circle_points(center, outer_radius, 32)
+	container.add_child(apron)
+
+	# Two compact one-lane exits turn the terminal circle into a true
+	# three-arm roundabout instead of a decorative turning bulb.
+	for exit_side in [-1.0, 1.0]:
+		var exit_direction: Vector2 = tangent * exit_side
+		var exit_end := center + exit_direction * 300.0
+		var half_width := cross_street_width * 0.5
+		var spur := Polygon2D.new()
+		spur.color = Color(0.115, 0.115, 0.115)
+		spur.polygon = PackedVector2Array([
+			center - outward * half_width,
+			exit_end - outward * half_width,
+			exit_end + outward * half_width,
+			center + outward * half_width
+		])
+		container.add_child(spur)
+		var center_line := Line2D.new()
+		center_line.width = line_width
+		center_line.default_color = Color(0.95, 0.72, 0.12)
+		center_line.add_point(center + exit_direction * island_radius)
+		center_line.add_point(exit_end)
+		container.add_child(center_line)
+		var spur_body := StaticBody2D.new()
+		spur_body.collision_layer = 1
+		spur_body.collision_mask = 2
+		container.add_child(spur_body)
+		for wall_side in [-1.0, 1.0]:
+			_add_wall_segment(
+				spur_body,
+				center + exit_direction * outer_radius * 0.72 + outward * half_width * wall_side,
+				exit_end + outward * half_width * wall_side
+			)
+		_build_cul_de_sac(container, exit_end, exit_direction, outward)
+
+	var island := Polygon2D.new()
+	island.color = Color(0.16, 0.34, 0.16)
+	island.polygon = _circle_points(center, island_radius, 24)
+	container.add_child(island)
+
+	var body := StaticBody2D.new()
+	body.collision_layer = 1
+	body.collision_mask = 2
+	container.add_child(body)
+	_add_round_boundary_openings(
+		body,
+		center,
+		outer_radius,
+		[-outward, tangent, -tangent]
+	)
+
+	var island_shape := CollisionShape2D.new()
+	var circle := CircleShape2D.new()
+	circle.radius = island_radius
+	island_shape.shape = circle
+	island_shape.position = center
+	body.add_child(island_shape)
+
+	var island_edge := Line2D.new()
+	island_edge.width = 4.0
+	island_edge.default_color = Color(0.92, 0.92, 0.92)
+	island_edge.closed = true
+	for point in _circle_points(center, island_radius, 24):
+		island_edge.add_point(point)
+	container.add_child(island_edge)
+
+
+func _circle_points(center: Vector2, radius: float, steps: int) -> PackedVector2Array:
+	var result := PackedVector2Array()
+	for step in range(steps):
+		result.append(center + Vector2.from_angle(TAU * float(step) / float(steps)) * radius)
+	return result
+
+
+func _add_round_boundary(
+	body: StaticBody2D,
+	center: Vector2,
+	radius: float,
+	outward: Vector2,
+	_tangent: Vector2,
+	leave_entrance: bool
+) -> void:
+	_add_round_boundary_openings(body, center, radius, [-outward] if leave_entrance else [])
+
+
+func _add_round_boundary_openings(
+	body: StaticBody2D,
+	center: Vector2,
+	radius: float,
+	openings: Array
+) -> void:
+	var steps := 24
+	for step in range(steps):
+		var a_direction := Vector2.from_angle(TAU * float(step) / float(steps))
+		var b_direction := Vector2.from_angle(TAU * float(step + 1) / float(steps))
+		var middle := (a_direction + b_direction).normalized()
+		var at_opening := false
+		for opening_value in openings:
+			var opening: Vector2 = opening_value
+			if middle.dot(opening) > 0.72:
+				at_opening = true
+				break
+		if at_opening:
+			continue
+		_add_wall_segment(body, center + a_direction * radius, center + b_direction * radius)
 
 
 func _add_wall_segment(body: StaticBody2D, start: Vector2, end: Vector2) -> void:
@@ -847,26 +1140,29 @@ func _make_dash(from: Vector2, to: Vector2) -> Line2D:
 func build_boundary_visuals() -> void:
 	var left_line := _get_or_create("LeftBoundary", "Line2D") as Line2D
 	var right_line := _get_or_create("RightBoundary", "Line2D") as Line2D
-
 	left_line.clear_points()
 	right_line.clear_points()
+	left_line.visible = false
+	right_line.visible = false
 
-	for point in left_points:
-		left_line.add_point(point)
-
-	for point in right_points:
-		right_line.add_point(point)
-
+	var container := _get_or_create("EdgeMarkings", "Node2D")
+	_clear_children(container)
 	var edge_color := Color(0.92, 0.92, 0.92)
+	if not show_debug_boundaries:
+		return
 
-	left_line.width = 5.0
-	right_line.width = 5.0
-
-	left_line.default_color = edge_color
-	right_line.default_color = edge_color
-
-	left_line.visible = show_debug_boundaries
-	right_line.visible = show_debug_boundaries
+	# Separate pieces leave a clean opening at every junction. A single Line2D
+	# used to draw a white stroke straight across side roads.
+	for i in range(left_points.size() - 1):
+		if _segment_is_intersection_opening(i):
+			continue
+		for points in [left_points, right_points]:
+			var edge := Line2D.new()
+			edge.width = 5.0
+			edge.default_color = edge_color
+			edge.add_point(points[i])
+			edge.add_point(points[i + 1])
+			container.add_child(edge)
 
 
 func build_debug_centerline() -> void:
@@ -976,6 +1272,11 @@ func clear_generated_content() -> void:
 
 	if road_surface:
 		_clear_children(road_surface)
+
+	var edge_markings := get_node_or_null("EdgeMarkings")
+
+	if edge_markings:
+		_clear_children(edge_markings)
 
 # ============================================================
 # SPAWN POSE

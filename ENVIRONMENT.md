@@ -25,6 +25,7 @@ physics implementation.
 
 - speed in world units and km/h
 - normalized speed
+- transmission gear (`D`, `N`, or `R` is available directly from the ego)
 - current steering
 - road-relative heading error
 - centerline and nearest-lane lateral error
@@ -43,6 +44,10 @@ This service does not apply controls or change simulation state.
   direction. Width, lane centers, and divider markings share the same smooth
   transition data, producing finite tapered lane additions and merges separated
   by constant-width road sections.
+- The compact map guarantees a seeded T-junction, four-way intersection,
+  roundabout branch, and cul-de-sac/dead-end bulbs. The arterial and every side
+  road are also represented by one connected `RoadNetwork`, including shortest
+  path lookup for the later destination-routing phase.
 - Road asphalt is rendered as independent convex strips to avoid concave
   polygon triangulation artifacts on wide curves.
 - Curve radius is constrained using the widest possible road section, keeping
@@ -50,17 +55,25 @@ This service does not apply controls or change simulation state.
 - Intersections are selected from the straightest nearby route segment. Side
   road center markings stop before the conflict area, and each travel direction
   has its own approach stop line.
-- Seeded cross streets create traversable four-way intersection openings.
+- Seeded cross streets create traversable one-lane side-road openings.
 - Widened turnaround bulbs provide enough physical road width for U-turns.
 - Traffic signals are placed at generated intersections and use timed
   green/yellow/red cycles with seeded phase offsets.
 - NPC traffic stops for red signals, handles yellow based on stopping distance,
   and proceeds on green.
+- At a narrowing, the outside lane signals, checks both the front and rear gap,
+  and merges gradually. The continuing lane always has priority; if a gap is
+  unsafe the merging vehicle stops before its lane ends.
 - Seeded pedestrians wait at curbs and cross while vehicle traffic is red.
 - Vehicle spawns search for a valid active lane and avoid intersection conflict
   zones. Pedestrians ignore vehicle bodies while walking so an accidental
   overlap cannot deadlock both actors; vehicles still detect and stop for them.
 - Vehicle sensors detect road boundaries, traffic, and pedestrians.
+- The top-left minimap uncovers roads only as the player explores them. Press
+  `M` to toggle its expanded view.
+- The keyboard transmission uses `W` for drive and `S` for brake/reverse. `S`
+  must bring the car to a stop before reverse engages, and reverse has its own
+  lower speed/acceleration limits. The speed HUD shows the live gear.
 
 ## Physics layers
 
@@ -71,7 +84,8 @@ This service does not apply controls or change simulation state.
 
 ## Current boundary
 
-This milestone includes the first deterministic intersections, signals, and
-pedestrians. A future network-routing phase can allow NPCs to choose side-road
-branches; current NPC traffic continues along the primary route. Weather/surface
-conditions and training systems remain separate phases.
+This milestone includes deterministic mixed-road geometry, signals,
+pedestrians, priority merges, reverse driving, exploration UI, and a connected
+navigation graph. Current NPC traffic continues along the primary route; a
+future traffic-routing phase can assign destinations across the existing graph.
+Weather/surface conditions and training systems remain separate phases.

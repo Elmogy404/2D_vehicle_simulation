@@ -10,6 +10,7 @@ const TrafficLightScript = preload("res://scripts/traffic_light.gd")
 
 var road_generator: Node
 var lights: Array[Node] = []
+var light_feature_indices: PackedInt32Array = PackedInt32Array()
 var rng := RandomNumberGenerator.new()
 signal lights_regenerated
 
@@ -34,11 +35,18 @@ func regenerate() -> void:
 		return
 
 	var feature_indices: PackedInt32Array = road_generator.get_intersection_indices()
+	var feature_types: PackedStringArray = road_generator.get_intersection_types()
 	var positions := PackedFloat32Array()
 
 	if not feature_indices.is_empty():
-		for feature_index in feature_indices:
-			positions.append(float(route.cumulative[feature_index]))
+		for feature_number in range(feature_indices.size()):
+			# Roundabouts use circulating priority and pedestrian detection, not a
+			# conventional red/green signal on the arterial approach.
+			if feature_number < feature_types.size() \
+			and feature_types[feature_number] == "roundabout":
+				continue
+			positions.append(float(route.cumulative[feature_indices[feature_number]]))
+			light_feature_indices.append(feature_number)
 	else:
 		var requested := rng.randi_range(minimum_lights, maximum_lights)
 		var maximum_fit := maxi(1, int(floor(available / minimum_spacing)) + 1)
@@ -75,6 +83,14 @@ func clear_lights() -> void:
 			light.queue_free()
 
 	lights.clear()
+	light_feature_indices.clear()
+
+
+func light_for_progress(target_progress: float) -> Node:
+	for light in lights:
+		if absf(float(light.get("progress")) - target_progress) < 1.0:
+			return light
+	return null
 
 
 func progress_snapshot() -> PackedFloat32Array:

@@ -31,14 +31,22 @@ func get_state() -> Dictionary:
 	)
 	var sensors: Node = ego.get_node_or_null("SensorRig")
 	var sensor_distances: Array[float] = []
+	var signed_speed: float = float(ego.get("current_speed"))
+	var speed_limit: float = (
+		float(ego.get("max_reverse_speed"))
+		if signed_speed < 0.0
+		else float(ego.get("max_speed"))
+	)
 
 	if sensors != null and sensors.has_method("get_observation"):
 		sensor_distances = sensors.get_observation()
 
 	return {
-		"speed": float(ego.get("current_speed")),
+		"speed": absf(signed_speed),
+		"signed_speed": signed_speed,
 		"speed_kmh": ego.get_speed_kmh(),
-		"normalized_speed": float(ego.get("current_speed")) / maxf(float(ego.get("max_speed")), 0.001),
+		"normalized_speed": absf(signed_speed) / maxf(speed_limit, 0.001),
+		"gear": ego.get_gear_label(),
 		"steering": float(ego.get("steering_input")),
 		"heading_error": heading_error,
 		"lateral_offset": lateral_offset,

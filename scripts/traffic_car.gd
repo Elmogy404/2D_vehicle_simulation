@@ -32,6 +32,13 @@ extends CharacterBody2D
 ## Extra braking multiplier when the available stopping distance is small.
 @export var emergency_brake_multiplier: float = 1.8
 
+@export_category("Lane Merging")
+@export var merge_lookahead: float = 480.0
+@export var merge_duration: float = 2.2
+@export var merge_ahead_clearance: float = 175.0
+@export var merge_behind_clearance: float = 155.0
+@export var merge_stop_buffer: float = 35.0
+
 ## How close another vehicle may be to this lane's re-entry
 ## point before this vehicle is allowed to loop back.
 @export var reentry_clearance: float = 150.0
@@ -92,6 +99,12 @@ var travel_direction: float = 1.0
 var lane_id: int = 0
 var lane_index: int = 0
 var lane_offset: float = 0.0
+var lane_change_active: bool = false
+var lane_change_from: int = 0
+var lane_change_to: int = 0
+var lane_change_elapsed: float = 0.0
+var merge_signal_active: bool = false
+var signal_lights: Array[Line2D] = []
 
 
 # ============================================================
@@ -101,6 +114,7 @@ var lane_offset: float = 0.0
 func _ready() -> void:
 	if not is_in_group("traffic"):
 		add_to_group("traffic")
+	_build_turn_signals()
 
 
 # ============================================================
@@ -156,6 +170,8 @@ func configure_visual(texture: Texture2D, body_size: Vector2) -> void:
 			rectangle.size = body_size
 			collider.shape = rectangle
 
+	_position_turn_signals()
+
 
 # Place the car exactly on its lane and face it forward.
 func snap_to_route() -> void:
@@ -163,7 +179,7 @@ func snap_to_route() -> void:
 		velocity = Vector2.ZERO
 		return
 
-	lane_offset = route.get_lane_offset_at(progress, lane_index, travel_direction)
+	lane_offset = _lane_offset_at(progress)
 	global_position = route.get_position_at(progress, lane_offset)
 
 	rotation = (
@@ -180,6 +196,8 @@ func _physics_process(delta: float) -> void:
 	if route == null or not route.is_valid():
 		velocity = Vector2.ZERO
 		return
+
+	_update_lane_merge(delta)
 
 	# --------------------------------------------------------
 	# Speed targets: cruise limited by curves, leaders and
@@ -207,6 +225,7 @@ func _physics_process(delta: float) -> void:
 		)
 
 	target_speed = minf(target_speed, traffic_light_speed_limit())
+	target_speed = minf(target_speed, merge_speed_limit())
 
 	# --------------------------------------------------------
 	# Acceleration / braking
@@ -261,11 +280,7 @@ func _physics_process(delta: float) -> void:
 		else:
 			target_distance = maxf(target_distance, exit)
 
-	var target_lane_offset := route.get_lane_offset_at(
-		target_distance,
-		lane_index,
-		travel_direction
-	)
+	var target_lane_offset := _lane_offset_at(target_distance)
 	var target_point: Vector2 = route.get_position_at(
 		target_distance,
 		target_lane_offset
@@ -302,7 +317,165 @@ func _physics_process(delta: float) -> void:
 		speed = 0.0
 
 	sync_progress()
-	lane_offset = route.get_lane_offset_at(progress, lane_index, travel_direction)
+	lane_offset = _lane_offset_at(progress)
+	_update_turn_signal_visuals()
+
+
+func _lane_offset_at(distance: float) -> float:
+	var side := 1.0 if travel_direction >= 0.0 else -1.0
+	var width: float = route.lane_width
+
+	if not lane_change_active:
+		return side * (float(lane_index) + 0.5) * width
+
+	var t := clampf(lane_change_elapsed / maxf(merge_duration, 0.1), 0.0, 1.0)
+	var smooth_t := t * t * (3.0 - 2.0 * t)
+	var from_offset := side * (float(lane_change_from) + 0.5) * width
+	var to_offset := side * (float(lane_change_to) + 0.5) * width
+	return lerpf(from_offset, to_offset, smooth_t)
+
+
+func _update_lane_merge(delta: float) -> void:
+	if lane_change_active:
+		lane_change_elapsed += delta
+
+		if lane_change_elapsed >= merge_duration:
+			lane_index = lane_change_to
+			lane_change_active = false
+			merge_signal_active = false
+			lane_change_elapsed = 0.0
+
+		return
+
+	if lane_index <= 0:
+		merge_signal_active = false
+		return
+
+	var end_gap := lane_end_gap()
+	merge_signal_active = end_gap < merge_lookahead
+
+	if merge_signal_active and can_merge_into(lane_index - 1):
+		lane_change_from = lane_index
+		lane_change_to = lane_index - 1
+		lane_change_elapsed = 0.0
+		lane_change_active = true
+
+
+func lane_end_gap() -> float:
+	if lane_index <= 0:
+		return INF
+
+	var step := 25.0
+	var distance := 0.0
+
+	while distance <= merge_lookahead:
+		var probe := progress + travel_direction * distance
+
+		if probe < 0.0 or probe > route.length:
+			return INF
+
+		if route.get_lane_count_at(probe) <= lane_index:
+			return distance
+
+		distance += step
+
+	return INF
+
+
+func can_merge_into(target_lane: int) -> bool:
+	for other in get_tree().get_nodes_in_group("traffic"):
+		if not is_instance_valid(other) or other == self:
+			continue
+
+		if other.get("route") != route:
+			continue
+
+		if float(other.get("travel_direction")) != travel_direction:
+			continue
+
+		var other_lane: int = int(other.get("lane_index"))
+
+		if bool(other.get("lane_change_active")):
+			other_lane = int(other.get("lane_change_to"))
+
+		if other_lane != target_lane:
+			continue
+
+		var gap := (float(other.get("progress")) - progress) * travel_direction
+
+		if gap >= 0.0 and gap < merge_ahead_clearance:
+			return false
+
+		if gap < 0.0 and absf(gap) < merge_behind_clearance:
+			return false
+
+	# The ego is not part of the traffic group, but it has exactly the same
+	# right-of-way in the continuing lane. Include its actual lateral position
+	# so an NPC cannot start a merge through the player's car.
+	var ego: Node2D = get_tree().get_first_node_in_group("vehicle_obstacle") as Node2D
+	if ego != null and is_instance_valid(ego):
+		var near: Dictionary = route.nearest(ego.global_position, progress, merge_lookahead)
+		var ego_progress: float = float(near["progress"])
+		var center := route.get_position_at(ego_progress)
+		var ego_offset := (ego.global_position - center).dot(route.get_normal_at(ego_progress))
+		var target_offset := route.get_lane_offset_at(ego_progress, target_lane, travel_direction)
+
+		if absf(ego_offset - target_offset) <= lane_match_distance:
+			var ego_gap := (ego_progress - progress) * travel_direction
+			if ego_gap >= 0.0 and ego_gap < merge_ahead_clearance:
+				return false
+			if ego_gap < 0.0 and absf(ego_gap) < merge_behind_clearance:
+				return false
+
+	return true
+
+
+func merge_speed_limit() -> float:
+	if lane_change_active or lane_index <= 0:
+		return cruise_speed
+
+	var end_gap := lane_end_gap()
+
+	if end_gap == INF:
+		return cruise_speed
+
+	if can_merge_into(lane_index - 1):
+		return cruise_speed
+
+	if end_gap <= merge_stop_buffer:
+		return 0.0
+
+	return sqrt(
+		2.0 * braking * maxf(end_gap - merge_stop_buffer, 0.0)
+	)
+
+
+func _build_turn_signals() -> void:
+	for y in [-vehicle_length * 0.36, vehicle_length * 0.36]:
+		var light := Line2D.new()
+		light.width = 7.0
+		light.default_color = Color(1.0, 0.58, 0.05)
+		light.z_index = 3
+		light.add_point(Vector2(-vehicle_width * 0.42 - 3.0, float(y)))
+		light.add_point(Vector2(-vehicle_width * 0.42 + 3.0, float(y)))
+		light.visible = false
+		add_child(light)
+		signal_lights.append(light)
+
+
+func _position_turn_signals() -> void:
+	for i in range(signal_lights.size()):
+		var y := -vehicle_length * 0.36 if i == 0 else vehicle_length * 0.36
+		signal_lights[i].clear_points()
+		signal_lights[i].add_point(Vector2(-vehicle_width * 0.42 - 3.0, y))
+		signal_lights[i].add_point(Vector2(-vehicle_width * 0.42 + 3.0, y))
+
+
+func _update_turn_signal_visuals() -> void:
+	var blink_on := merge_signal_active and fmod(Time.get_ticks_msec() / 1000.0, 0.8) < 0.4
+
+	for light in signal_lights:
+		light.visible = blink_on
 
 
 # ============================================================
@@ -533,16 +706,11 @@ func leader_state() -> Dictionary:
 		if float(other.get("travel_direction")) != travel_direction:
 			continue
 
-		var other_offset := route.get_lane_offset_at(
-			float(other.get("progress")),
-			int(other.get("lane_index")),
-			travel_direction
-		)
-		var own_offset := route.get_lane_offset_at(
-			float(other.get("progress")),
-			lane_index,
-			travel_direction
-		)
+		var other_offset: float = float(other.call(
+			"_lane_offset_at",
+			float(other.get("progress"))
+		))
+		var own_offset: float = _lane_offset_at(float(other.get("progress")))
 
 		if absf(other_offset - own_offset) > lane_match_distance:
 			continue
@@ -639,16 +807,11 @@ func same_lane_progresses() -> Array[float]:
 		if float(other.get("travel_direction")) != travel_direction:
 			continue
 
-		var other_offset := route.get_lane_offset_at(
-			float(other.get("progress")),
-			int(other.get("lane_index")),
-			travel_direction
-		)
-		var own_offset := route.get_lane_offset_at(
-			float(other.get("progress")),
-			lane_index,
-			travel_direction
-		)
+		var other_offset: float = float(other.call(
+			"_lane_offset_at",
+			float(other.get("progress"))
+		))
+		var own_offset: float = _lane_offset_at(float(other.get("progress")))
 
 		if absf(other_offset - own_offset) > lane_match_distance:
 			continue

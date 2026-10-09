@@ -36,7 +36,7 @@ extends Node2D
 
 @export_category("Debug")
 
-@export var show_rays: bool = true
+@export var show_rays: bool = false
 @export var ray_width: float = 2.0
 
 

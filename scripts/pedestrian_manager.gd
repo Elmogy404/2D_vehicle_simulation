@@ -26,7 +26,6 @@ func regenerate() -> void:
 	rng.seed = seed_value
 	var route: RoutePath = road_generator.get_route()
 	var indices: PackedInt32Array = road_generator.get_intersection_indices()
-	var lights: Array = light_manager.get("lights")
 
 	for intersection_number in range(indices.size()):
 		var index: int = indices[intersection_number]
@@ -35,7 +34,7 @@ func regenerate() -> void:
 		var normal := route.get_normal_at(progress)
 		var tangent := route.get_direction_at(progress)
 		var half_width := route.get_half_width_at(progress)
-		var linked_light: Node = lights[intersection_number] if intersection_number < lights.size() else null
+		var linked_light: Node = light_manager.light_for_progress(progress)
 
 		for pedestrian_index in range(pedestrians_per_intersection):
 			var along_offset := (float(pedestrian_index) - float(pedestrians_per_intersection - 1) * 0.5) * 28.0

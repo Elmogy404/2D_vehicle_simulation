@@ -178,6 +178,20 @@ func run_all() -> void:
 		light_manager.progress_snapshot() == light_snapshot,
 		"same light seed reproduces identical positions"
 	)
+	var signal_types: PackedStringArray = road.get_intersection_types()
+	var signal_indices: PackedInt32Array = road.get_intersection_indices()
+	var roundabout_feature := signal_types.find("roundabout")
+	var roundabout_progress: float = float(
+		road.get_route().cumulative[signal_indices[roundabout_feature]]
+	)
+	check(
+		light_manager.light_for_progress(roundabout_progress) == null,
+		"roundabout uses circulating priority instead of a traffic signal"
+	)
+	check(
+		light_snapshot.size() == signal_indices.size() - 1,
+		"all signalized junctions receive one seeded traffic-light phase"
+	)
 
 	# --------------------------------------------------------
 	# COMPLEX ROAD + PEDESTRIANS
@@ -226,6 +240,74 @@ func run_all() -> void:
 	check(
 		road.get_node("CrossStreets").get_child_count() > 0,
 		"intersections have traversable cross-street geometry"
+	)
+
+	var junction_types: PackedStringArray = road.get_intersection_types()
+	check(
+		junction_types.has("t_junction")
+		and junction_types.has("four_way")
+		and junction_types.has("roundabout"),
+		"map guarantees T, four-way, and roundabout pieces"
+	)
+	check(
+		road.get_map_paths().size() > 4,
+		"map exposes arterial, side-road, dead-end, and roundabout paths"
+	)
+	var network: RefCounted = road.get_road_network()
+	check(
+		network.call("graph_is_connected"),
+		"road centerlines form one connected navigation graph"
+	)
+	var graph_positions: Array = network.get("positions")
+	var graph_route: PackedVector2Array = network.call(
+		"find_path", graph_positions[0], graph_positions[graph_positions.size() - 1]
+	)
+	check(graph_route.size() > 2, "navigation graph finds a route across the map")
+
+	var probe_shape := CircleShape2D.new()
+	probe_shape.radius = 18.0
+	var probe := PhysicsShapeQueryParameters2D.new()
+	probe.shape = probe_shape
+	probe.collision_mask = 1
+	probe.collide_with_areas = false
+	var centerlines_clear := true
+	var blocked_centerline := ""
+	var map_paths: Array[PackedVector2Array] = road.get_map_paths()
+	for path_index in range(map_paths.size()):
+		for point_index in range(map_paths[path_index].size()):
+			var map_point: Vector2 = map_paths[path_index][point_index]
+			probe.transform = Transform2D(0.0, map_point)
+			var hits: Array[Dictionary] = main.get_world_2d().direct_space_state.intersect_shape(probe, 1)
+			if not hits.is_empty():
+				centerlines_clear = false
+				var hit_collider: Node = hits[0].get("collider")
+				blocked_centerline = "path %d point %d at %s (%s)" % [
+					path_index, point_index, map_point,
+					hit_collider.get_path() if hit_collider != null else "unknown"
+				]
+				break
+	check(
+		centerlines_clear,
+		"all mapped road centerlines are physically traversable" + (
+			"" if centerlines_clear else ": " + blocked_centerline
+		)
+	)
+
+	var minimap: Node = main.get_node("Minimap")
+	var minimap_view: Control = minimap.get_node("View")
+	var reveal_count := 0
+	var point_count := 0
+	for flags in minimap_view.get("discovered"):
+		point_count += flags.size()
+		for flag in flags:
+			reveal_count += int(flag)
+	check(
+		minimap_view.position == Vector2(16.0, 16.0),
+		"minimap is anchored in the top-left corner"
+	)
+	check(
+		reveal_count > 0 and reveal_count < point_count,
+		"minimap starts with only nearby roads uncovered"
 	)
 
 	var pedestrians: Array = pedestrian_manager.get("pedestrians")
@@ -426,6 +508,59 @@ func run_all() -> void:
 	)
 
 	# --------------------------------------------------------
+	# PRIORITY MERGE: ending outside lane yields to through lane
+	# --------------------------------------------------------
+	print("== Priority lane merge ==")
+	traffic.clear_traffic()
+	var active_route: RoutePath = road.get_route()
+	var merge_progress := -1.0
+	for sample in range(0, int(active_route.length) - 350, 25):
+		if active_route.get_lane_count_at(float(sample)) == 3 \
+		and active_route.get_lane_count_at(float(sample + 300)) < 3:
+			merge_progress = float(sample)
+			break
+
+	var traffic_scene: PackedScene = load("res://scenes/traffic_car.tscn")
+	var merging_car: Node = traffic_scene.instantiate()
+	var through_car: Node = traffic_scene.instantiate()
+	traffic.add_child(merging_car)
+	traffic.add_child(through_car)
+	merging_car.setup(active_route, 90, 2, 225.0, 1.0, merge_progress, 110.0)
+	through_car.setup(active_route, 91, 1, 135.0, 1.0, merge_progress - 80.0, 125.0)
+	merging_car.call("_update_lane_merge", 0.016)
+	check(merge_progress >= 0.0, "test located a generated outside-lane ending")
+	check(
+		bool(merging_car.get("merge_signal_active")),
+		"ending-lane car signals before merging"
+	)
+	check(
+		not bool(merging_car.get("lane_change_active")),
+		"ending-lane car waits when the continuing lane gap is unsafe"
+	)
+	check(
+		is_equal_approx(float(through_car.call("merge_speed_limit")), float(through_car.get("cruise_speed"))),
+		"continuing lane keeps priority and does not yield"
+	)
+
+	through_car.set("progress", maxf(merge_progress - 400.0, 0.0))
+	through_car.call("snap_to_route")
+	merging_car.call("_update_lane_merge", 0.016)
+	check(
+		bool(merging_car.get("lane_change_active")),
+		"ending-lane car accepts a safe gap"
+	)
+	merging_car.call("_update_lane_merge", float(merging_car.get("merge_duration")) + 0.1)
+	check(
+		int(merging_car.get("lane_index")) == 1,
+		"outside-lane merge completes into the adjacent lane"
+	)
+	traffic.remove_child(merging_car)
+	traffic.remove_child(through_car)
+	merging_car.queue_free()
+	through_car.queue_free()
+	traffic.regenerate()
+
+	# --------------------------------------------------------
 	# CHANGE 2: progressive acceleration
 	# --------------------------------------------------------
 	print("== CHANGE 2: ego acceleration ==")
@@ -546,6 +681,20 @@ func run_all() -> void:
 		v_boost > 0.0,
 		"accelerate input produced motion (%.0f)" % v_boost
 	)
+
+	# S behaves like an automatic gearbox: brake while moving, then reverse.
+	reset_straight_drive()
+	Input.action_press("brake")
+	await wait_physics(20)
+	Input.action_release("brake")
+	check(ego.current_speed < 0.0, "brake input engages reverse after stopping")
+	check(
+		absf(ego.current_speed) <= float(ego.get("max_reverse_speed")),
+		"reverse speed obeys its lower configured limit"
+	)
+	check(ego.get_gear_label() == "R", "vehicle reports reverse gear")
+	reset_drive_state()
+	check(ego.get_gear_label() == "N", "stopped vehicle reports neutral gear")
 
 	# --------------------------------------------------------
 	# CONTROLLER-NEUTRAL COMMANDS + BICYCLE STEERING

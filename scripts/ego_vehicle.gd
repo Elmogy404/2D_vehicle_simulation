@@ -7,6 +7,13 @@ extends CharacterBody2D
 @export var acceleration: float = 250.0
 @export var braking: float = 500.0
 
+## Reverse deliberately has a lower ceiling and gentler acceleration than
+## forward driving. The brake pedal only selects reverse after the vehicle has
+## come to a complete stop, matching an automatic transmission.
+@export var max_reverse_speed: float = 95.0
+@export var reverse_acceleration: float = 150.0
+@export var direction_change_threshold: float = 2.0
+
 ## Passive rolling resistance when neither pedal is pressed.
 @export var coast_deceleration: float = 75.0
 
@@ -76,13 +83,31 @@ func _physics_process(delta: float) -> void:
 	# ACCELERATION / BRAKING
 	# --------------------------------------------------------
 
-	# Braking wins when both pedals are commanded, matching a safe controller
-	# contract and avoiding accidental acceleration from conflicting inputs.
+	# Braking wins when both pedals are commanded. S first brakes a forward
+	# moving car, then engages reverse on a later physics tick after it stops.
 	if brake_input > 0.0:
-		current_speed -= braking * brake_input * delta
+		if current_speed > direction_change_threshold:
+			current_speed = move_toward(
+				current_speed,
+				0.0,
+				braking * brake_input * delta
+			)
+		elif current_speed > 0.0:
+			current_speed = 0.0
+		else:
+			current_speed -= reverse_acceleration * brake_input * delta
 
 	elif throttle_input > 0.0:
-		current_speed += acceleration * throttle_input * delta
+		if current_speed < -direction_change_threshold:
+			current_speed = move_toward(
+				current_speed,
+				0.0,
+				braking * throttle_input * delta
+			)
+		elif current_speed < 0.0:
+			current_speed = 0.0
+		else:
+			current_speed += acceleration * throttle_input * delta
 
 	else:
 		current_speed = move_toward(
@@ -94,7 +119,7 @@ func _physics_process(delta: float) -> void:
 
 	current_speed = clamp(
 		current_speed,
-		0.0,
+		-max_reverse_speed,
 		max_speed
 	)
 
@@ -114,7 +139,7 @@ func _physics_process(delta: float) -> void:
 	# VEHICLE ROTATION
 	# --------------------------------------------------------
 
-	if current_speed > 1.0:
+	if absf(current_speed) > 1.0:
 		var steering_angle := (
 			steering_input
 			* deg_to_rad(max_steering_angle)
@@ -134,7 +159,7 @@ func _physics_process(delta: float) -> void:
 	# Speed at the instant before the move, so a collision
 	# reports the real impact speed (velocity is altered by
 	# move_and_slide() during the contact itself).
-	var impact_speed := current_speed
+	var impact_speed := absf(current_speed)
 
 	velocity = (
 		Vector2.UP.rotated(rotation)
@@ -208,3 +233,11 @@ func get_speed_kmh() -> float:
 ## Impact speed for the Game Over screen.
 func get_crash_kmh() -> float:
 	return crash_speed * kmh_per_unit
+
+
+func get_gear_label() -> String:
+	if current_speed < -direction_change_threshold:
+		return "R"
+	if current_speed > direction_change_threshold:
+		return "D"
+	return "N"
