@@ -747,6 +747,10 @@ func leader_state() -> Dictionary:
 	for pedestrian in get_tree().get_nodes_in_group("pedestrians"):
 		if not is_instance_valid(pedestrian):
 			continue
+		# Pedestrians waiting at the curb are deliberately outside the roadway.
+		# Only an active crossing should act as a longitudinal lane obstacle.
+		if not bool(pedestrian.get("is_crossing")):
+			continue
 
 		var pedestrian_gap: float = gap_to_position(pedestrian.global_position)
 

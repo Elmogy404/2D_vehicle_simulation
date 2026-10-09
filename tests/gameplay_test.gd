@@ -326,38 +326,92 @@ func run_all() -> void:
 	)
 
 	var pedestrians: Array = pedestrian_manager.get("pedestrians")
-	var expected_pedestrians: int = (
-		road.get_intersection_indices().size()
+	var pedestrian_intersection_count := 0
+	for feature_type in road.get_intersection_types():
+		if feature_type != "roundabout":
+			pedestrian_intersection_count += 1
+	var expected_pedestrians: int = pedestrian_intersection_count \
 		* int(pedestrian_manager.get("pedestrians_per_intersection"))
-	)
 
 	check(
 		pedestrians.size() == expected_pedestrians,
-		"pedestrians generated at every intersection"
+		"pedestrians generated at signalized crossings, not roundabouts"
 	)
 
 	var pedestrian_layers_ok: bool = true
+	var pedestrian_scenes_complete := true
 
 	for pedestrian in pedestrians:
-		if pedestrian.collision_layer != 4 or pedestrian.collision_mask != 1:
+		if pedestrian.collision_layer != 4 or pedestrian.collision_mask != 0:
 			pedestrian_layers_ok = false
+		if pedestrian.get_node_or_null("Sprite2D") == null \
+		or pedestrian.get_node_or_null("CollisionShape2D") == null \
+		or pedestrian.get("traffic_light") == null:
+			pedestrian_scenes_complete = false
 
 	check(pedestrian_layers_ok, "pedestrians use dedicated collision layers")
+	check(
+		pedestrian_scenes_complete,
+		"each pedestrian has a sprite, hitbox, and linked signal"
+	)
+	var route: RoutePath = road.get_route()
+	var crosswalks: Node = pedestrian_manager.get_node("Crosswalks")
+	var crosswalks_inside_road := crosswalks.get_child_count() > 0
+	var maximum_crosswalk_span := 0.0
+	var maximum_crosswalk_alpha := 0.0
+	for stripe in crosswalks.get_children():
+		if not stripe is Line2D or stripe.get_point_count() != 2:
+			crosswalks_inside_road = false
+			continue
+		maximum_crosswalk_span = maxf(
+			maximum_crosswalk_span,
+			stripe.get_point_position(0).distance_to(stripe.get_point_position(1))
+		)
+		maximum_crosswalk_alpha = maxf(maximum_crosswalk_alpha, stripe.default_color.a)
+		var stripe_progress := float(stripe.get_meta("route_progress"))
+		var road_edges: Dictionary = road.get_road_edges_at(stripe_progress)
+		var left_edge: Vector2 = road_edges["left"]
+		var right_edge: Vector2 = road_edges["right"]
+		var road_span := left_edge.distance_to(right_edge)
+		var expected_inset: float = float(pedestrian_manager.get("crosswalk_edge_inset")) \
+			+ stripe.width * 0.5
+		var cross_road_axis: Vector2 = (right_edge - left_edge).normalized()
+		var expected_start: Vector2 = left_edge + cross_road_axis * expected_inset
+		var expected_end: Vector2 = right_edge - cross_road_axis * expected_inset
+		if road_span <= expected_inset * 2.0 \
+		or stripe.get_point_position(0).distance_to(expected_start) > 0.1 \
+		or stripe.get_point_position(1).distance_to(expected_end) > 0.1:
+			crosswalks_inside_road = false
+		for point_index in range(2):
+			var point: Vector2 = stripe.get_point_position(point_index)
+			var nearest := route.nearest(point)
+			var local_half_width := route.get_half_width_at(float(nearest["progress"]))
+			if float(nearest["distance"]) + stripe.width * 0.5 \
+			> local_half_width - float(pedestrian_manager.get("crosswalk_edge_inset")) + 2.0:
+				crosswalks_inside_road = false
+	var generated_widths: PackedFloat32Array = road.get("road_widths")
+	var maximum_generated_width := 0.0
+	for width in generated_widths:
+		maximum_generated_width = maxf(maximum_generated_width, width)
+	check(
+		crosswalks_inside_road
+		and maximum_crosswalk_span < maximum_generated_width
+		and maximum_crosswalk_alpha <= 0.5,
+		"crosswalk bars are small, translucent, and stay inside local road edges"
+	)
 
 	var pedestrian_waiting_zones_clear := true
 	var pedestrians_per_intersection := int(pedestrian_manager.get("pedestrians_per_intersection"))
 	var side_road_half_width := float(road.get("cross_street_width")) * 0.5
 	var required_side_clearance := float(pedestrian_manager.get("side_road_clearance"))
-	var route: RoutePath = road.get_route()
 	var intersection_indices: PackedInt32Array = road.get_intersection_indices()
 	for pedestrian_index in range(pedestrians.size()):
-		var intersection_number := int(pedestrian_index / pedestrians_per_intersection)
+		var intersection_number := int(pedestrians[pedestrian_index].get("intersection_index"))
 		var route_index := intersection_indices[intersection_number]
 		var progress := float(route.cumulative[route_index])
-		var center := route.get_position_at(progress)
-		var tangent := route.get_direction_at(progress)
 		var endpoint: Vector2 = pedestrians[pedestrian_index].get("endpoint_a")
-		var along_offset := absf((endpoint - center).dot(tangent))
+		var endpoint_progress := float(route.nearest(endpoint)["progress"])
+		var along_offset := absf(endpoint_progress - progress)
 		if along_offset < side_road_half_width + required_side_clearance - 1.0:
 			pedestrian_waiting_zones_clear = false
 			break
@@ -387,6 +441,15 @@ func run_all() -> void:
 			"pedestrian clears accidental vehicle overlap without deadlocking"
 		)
 		blocker.queue_free()
+		await wait_physics(120)
+		var crossing_nearest := route.nearest(pedestrian.global_position)
+		var crossing_half_width := route.get_half_width_at(
+			float(crossing_nearest["progress"])
+		)
+		check(
+			float(crossing_nearest["distance"]) <= crossing_half_width + 5.0,
+			"pedestrian crosses the curb boundary instead of freezing outside the road"
+		)
 
 	# --------------------------------------------------------
 	# CHANGE 1: variable NPC speeds

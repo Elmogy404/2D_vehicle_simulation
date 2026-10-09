@@ -114,6 +114,8 @@ func check_seed(road: Node, seed_value: int) -> void:
 		if strip is Polygon2D and Geometry2D.triangulate_polygon(strip.polygon).size() != 6:
 			strips_valid = false
 	check(strips_valid, "seed %d has no folded asphalt strips" % seed_value)
+	check_boundary_chains(road, seed_value)
+	check_secondary_boundary_chains(road, seed_value)
 
 	var probe_shape := CircleShape2D.new()
 	probe_shape.radius = 14.0
@@ -144,6 +146,114 @@ func check_seed(road: Node, seed_value: int) -> void:
 	check(
 		centerlines_clear,
 		"seed %d keeps every mapped centerline physically open%s" % [seed_value, blocked]
+	)
+
+
+func check_boundary_chains(road: Node, seed_value: int) -> void:
+	var edge_container: Node = road.get_node("EdgeMarkings")
+	var left: Array[Vector2] = road.get("left_points")
+	var right: Array[Vector2] = road.get("right_points")
+	var centers: Array[Vector2] = road.get_center_points()
+	var inset_left: Array[Vector2] = road.call("_inset_boundary_points", left, centers)
+	var inset_right: Array[Vector2] = road.call("_inset_boundary_points", right, centers)
+	var expected_segments := (left.size() - 1) * 2
+	var bands := 0
+	var aligned := true
+	var seen_segments: Dictionary = {}
+	for band in edge_container.get_children():
+		if not band is Polygon2D or not band.is_in_group("main_road_outlines"):
+			aligned = false
+			continue
+		var segment_index := int(band.get_meta("segment_index"))
+		var boundary_side := float(band.get_meta("boundary_side"))
+		if segment_index < 0 or segment_index >= left.size() - 1 \
+		or not is_equal_approx(absf(boundary_side), 1.0):
+			aligned = false
+			continue
+		var segment_key := "%d:%d" % [segment_index, int(boundary_side)]
+		if seen_segments.has(segment_key):
+			aligned = false
+		seen_segments[segment_key] = true
+		var outer: Array[Vector2] = left if boundary_side > 0.0 else right
+		var inner: Array[Vector2] = inset_left if boundary_side > 0.0 else inset_right
+		var expected := PackedVector2Array([
+			outer[segment_index], outer[segment_index + 1],
+			inner[segment_index + 1], inner[segment_index]
+		])
+		if band.polygon.size() != 4 or float(band.get_meta("outline_inset")) != 4.0:
+			aligned = false
+			continue
+		for vertex_index in range(4):
+			if band.polygon[vertex_index].distance_squared_to(expected[vertex_index]) > 0.001:
+				aligned = false
+		bands += 1
+	var cross_streets: Node = road.get_node("CrossStreets")
+	var junctions_draw_over_outline := edge_container.get_index() < cross_streets.get_index()
+	check(
+		aligned and bands == expected_segments and seen_segments.size() == expected_segments \
+		and junctions_draw_over_outline,
+		"seed %d keeps continuous exact-edge outlines; junction asphalt masks only real overlaps"
+		% seed_value
+	)
+
+
+func check_secondary_boundary_chains(road: Node, seed_value: int) -> void:
+	var paths: Array[PackedVector2Array] = road.get_map_paths()
+	var widths: PackedFloat32Array = road.get("secondary_path_widths")
+	var edge_container: Node = road.get_node("CrossStreets")
+	var edge_bands: Array[Polygon2D] = []
+	for child in edge_container.get_children():
+		if child is Polygon2D and child.is_in_group("secondary_road_outlines"):
+			edge_bands.append(child)
+	var aligned := not edge_bands.is_empty()
+	for band in edge_bands:
+		var path_index := int(band.get_meta("path_index")) + 1
+		var segment_index := int(band.get_meta("segment_index"))
+		var side_index := int(band.get_meta("side_index"))
+		if path_index <= 0 or path_index >= paths.size():
+			aligned = false
+			continue
+		var path := paths[path_index]
+		if segment_index < 0 or segment_index >= path.size() - 1:
+			aligned = false
+			continue
+		var half_width := widths[path_index - 1] * 0.5
+		var is_ring := path.size() > 12 and path[0].distance_squared_to(path[-1]) < 1.0
+		var start := path[segment_index]
+		var finish := path[segment_index + 1]
+		var segment := finish - start
+		var start_trim := 0.0 if is_ring else float(road.call("_junction_clearance", start, half_width))
+		var finish_trim := 0.0 if is_ring else float(road.call("_junction_clearance", finish, half_width))
+		if segment.length() < 1.0 or start_trim + finish_trim >= segment.length() - 12.0 \
+		or (not is_ring and road.call("_segment_inside_roundabout", start, finish)):
+			aligned = false
+			continue
+		var start_t := start_trim / segment.length()
+		var finish_t := 1.0 - finish_trim / segment.length()
+		var edges: Dictionary = road.call("_get_secondary_path_edges", path, half_width, is_ring)
+		var side_edges: Array[Vector2] = edges["left"] if side_index == 0 else edges["right"]
+		var edge_start := side_edges[segment_index].lerp(side_edges[segment_index + 1], start_t)
+		var edge_finish := side_edges[segment_index + 1].lerp(
+			side_edges[segment_index], 1.0 - finish_t
+		)
+		var direction := segment.normalized()
+		var start_reference := start + direction * start_trim
+		var finish_reference := finish - direction * finish_trim
+		var inset := float(band.get_meta("outline_inset"))
+		var expected := PackedVector2Array([
+			edge_start, edge_finish,
+			edge_finish + (finish_reference - edge_finish).normalized() * inset,
+			edge_start + (start_reference - edge_start).normalized() * inset
+		])
+		if band.polygon.size() != 4 or inset != 4.0:
+			aligned = false
+			continue
+		for vertex_index in range(4):
+			if band.polygon[vertex_index].distance_squared_to(expected[vertex_index]) > 0.001:
+				aligned = false
+	check(
+		aligned,
+		"seed %d secondary outline polygons match mitered and trimmed asphalt edges" % seed_value
 	)
 
 

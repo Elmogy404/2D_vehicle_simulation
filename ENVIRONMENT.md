@@ -77,11 +77,14 @@ This service does not apply controls or change simulation state.
 - At a narrowing, the outside lane signals, checks both the front and rear gap,
   and merges gradually. The continuing lane always has priority; if a gap is
   unsafe the merging vehicle stops before its lane ends.
-- Seeded pedestrians wait on curb areas beside side-road mouths and cross while
-  vehicle traffic is red, leaving the local-road travel lanes unobstructed.
+- Seeded pedestrians spawn at marked crosswalks beside side-road mouths, wait
+  outside the roadway, and cross only during a red vehicle phase. Once a
+  crossing starts, they finish it even if the light changes; at most one
+  crossing is started per red phase.
 - Vehicle spawns search for a valid active lane and avoid intersection conflict
   zones. Pedestrians ignore vehicle bodies while walking so an accidental
-  overlap cannot deadlock both actors; vehicles still detect and stop for them.
+  overlap cannot deadlock both actors; traffic yields to pedestrians only
+  during active crossings.
 - Vehicle sensors detect road boundaries, traffic, and pedestrians.
 - The top-left minimap fits and displays the complete generated road network.
   Press `M` to toggle its expanded view.

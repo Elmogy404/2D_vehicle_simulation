@@ -1,6 +1,8 @@
 extends Node2D
 
 const ROAD_NETWORK := preload("res://scripts/road_network.gd")
+const BOUNDARY_BAND_WIDTH := 4.0
+const JUNCTION_EDGE_CLEARANCE := 4.0
 
 # ============================================================
 # ROAD
@@ -198,6 +200,27 @@ func get_route() -> RoutePath:
 	return route
 
 
+## Returns the exact interpolated asphalt curb vertices used by RoadSurface.
+## Systems that place paint or props on the roadway should use these edges
+## rather than reconstructing them from a smoothed centerline normal.
+func get_road_edges_at(progress: float) -> Dictionary:
+	if left_points.size() < 2 or right_points.size() != left_points.size():
+		return {"left": Vector2.ZERO, "right": Vector2.ZERO}
+
+	var clamped_progress := clampf(progress, 0.0, route.length)
+	var segment_index := clampi(route.cumulative.bsearch(clamped_progress) - 1, 0, left_points.size() - 2)
+	var segment_length := route.cumulative[segment_index + 1] - route.cumulative[segment_index]
+	var weight := clampf(
+		(clamped_progress - route.cumulative[segment_index]) / maxf(segment_length, 0.001),
+		0.0,
+		1.0
+	)
+	return {
+		"left": left_points[segment_index].lerp(left_points[segment_index + 1], weight),
+		"right": right_points[segment_index].lerp(right_points[segment_index + 1], weight)
+	}
+
+
 func get_road_network() -> RefCounted:
 	return road_network
 
@@ -223,10 +246,13 @@ func generate_road() -> void:
 	road_network.build(get_map_paths())
 
 	build_road_polygon()
+	# Lay the continuous main-road curbs before side-street asphalt. Junction
+	# surfaces then mask only the real overlap at each road mouth, instead of
+	# deleting several whole arterial segments around every intersection.
+	build_boundary_visuals()
 	build_cross_streets()
 	build_obstacles()
 	build_lane_markings()
-	build_boundary_visuals()
 	build_debug_centerline()
 	build_collisions()
 
@@ -1403,12 +1429,17 @@ func _build_secondary_network(container: Node) -> void:
 	body.collision_mask = 2
 	container.add_child(body)
 
+	# Draw every asphalt strip before any paint. A later intersecting street
+	# otherwise covers curb lines that were already painted for earlier paths.
 	for path_index in range(secondary_paths.size()):
 		var path := secondary_paths[path_index]
 		if path.size() < 2:
 			continue
 		var half_width := secondary_path_widths[path_index] * 0.5
 		var is_ring := path.size() > 12 and path[0].distance_squared_to(path[-1]) < 1.0
+		var path_edges := _get_secondary_path_edges(path, half_width, is_ring)
+		var left_edges: Array[Vector2] = path_edges["left"]
+		var right_edges: Array[Vector2] = path_edges["right"]
 
 		for segment_index in range(path.size() - 1):
 			var start := path[segment_index]
@@ -1417,38 +1448,155 @@ func _build_secondary_network(container: Node) -> void:
 			if segment.length_squared() < 1.0:
 				continue
 			var direction := segment.normalized()
-			var normal := Vector2(-direction.y, direction.x)
 			var strip := Polygon2D.new()
 			strip.color = Color(0.115, 0.115, 0.115)
 			strip.polygon = PackedVector2Array([
-				start + normal * half_width,
-				finish + normal * half_width,
-				finish - normal * half_width,
-				start - normal * half_width
+				left_edges[segment_index],
+				left_edges[segment_index + 1],
+				right_edges[segment_index + 1],
+				right_edges[segment_index]
 			])
 			container.add_child(strip)
 
 			if not is_ring and not _segment_inside_roundabout(start, finish):
 				var start_trim := _junction_clearance(start, half_width)
 				var finish_trim := _junction_clearance(finish, half_width)
-				var wall_start := start + direction * start_trim
-				var wall_finish := finish - direction * finish_trim
-				if wall_start.distance_to(wall_finish) > 12.0:
+				if start_trim + finish_trim < segment.length() - 12.0:
+					var start_t := start_trim / segment.length()
+					var finish_t := 1.0 - finish_trim / segment.length()
 					for wall_side in [-1.0, 1.0]:
-						var edge_start: Vector2 = wall_start + normal * half_width * wall_side
-						var edge_finish: Vector2 = wall_finish + normal * half_width * wall_side
+						var edge_start: Vector2 = (
+							left_edges[segment_index]
+							if wall_side > 0.0
+							else right_edges[segment_index]
+						).lerp(
+							left_edges[segment_index + 1]
+							if wall_side > 0.0
+							else right_edges[segment_index + 1],
+							start_t
+						)
+						var edge_finish: Vector2 = (
+							left_edges[segment_index + 1]
+							if wall_side > 0.0
+							else right_edges[segment_index + 1]
+						).lerp(
+							left_edges[segment_index]
+							if wall_side > 0.0
+							else right_edges[segment_index],
+							1.0 - finish_t
+						)
 						_add_wall_segment(body, edge_start, edge_finish)
-						_add_edge_visual(container, edge_start, edge_finish)
-
-		# Circular asphalt joints remove cracks and pointed triangles where two
-		# independently angled street strips meet.
-		for point_index in range(1, path.size() - 1):
-			var joint := Polygon2D.new()
-			joint.color = Color(0.115, 0.115, 0.115)
-			joint.polygon = _circle_points(path[point_index], half_width, 16)
-			container.add_child(joint)
+	for path_index in range(secondary_paths.size()):
+		var path := secondary_paths[path_index]
+		if path.size() < 2:
+			continue
+		var half_width := secondary_path_widths[path_index] * 0.5
+		var is_ring := path.size() > 12 and path[0].distance_squared_to(path[-1]) < 1.0
+		var path_edges := _get_secondary_path_edges(path, half_width, is_ring)
+		_build_secondary_edge_visuals(
+			container,
+			path_index,
+			path,
+			path_edges["left"],
+			path_edges["right"],
+			half_width,
+			is_ring
+		)
 
 		_add_dashed_centerline(container, path, is_ring, half_width)
+
+
+func _get_secondary_path_edges(
+	path: PackedVector2Array,
+	half_width: float,
+	is_ring: bool
+) -> Dictionary:
+	var left: Array[Vector2] = []
+	var right: Array[Vector2] = []
+	for point_index in range(path.size()):
+		var previous_normal := Vector2.ZERO
+		var next_normal := Vector2.ZERO
+		if point_index > 0 or is_ring:
+			var previous_index := point_index - 1 if point_index > 0 else path.size() - 2
+			var previous_direction := path[previous_index + 1] - path[previous_index]
+			if previous_direction.length_squared() > 0.001:
+				previous_direction = previous_direction.normalized()
+				previous_normal = Vector2(-previous_direction.y, previous_direction.x)
+		if point_index < path.size() - 1 or is_ring:
+			var next_index := point_index if point_index < path.size() - 1 else 0
+			var next_direction := path[next_index + 1] - path[next_index]
+			if next_direction.length_squared() > 0.001:
+				next_direction = next_direction.normalized()
+				next_normal = Vector2(-next_direction.y, next_direction.x)
+
+		var offset_normal := next_normal if previous_normal == Vector2.ZERO else previous_normal
+		var offset := offset_normal * half_width
+		if previous_normal != Vector2.ZERO and next_normal != Vector2.ZERO:
+			var miter := previous_normal + next_normal
+			if miter.length_squared() > 0.001:
+				var miter_direction := miter.normalized()
+				var denominator := maxf(absf(miter_direction.dot(next_normal)), 0.5)
+				offset = miter_direction * minf(half_width / denominator, half_width * 2.0)
+		left.append(path[point_index] + offset)
+		right.append(path[point_index] - offset)
+	return {"left": left, "right": right}
+
+
+func _build_secondary_edge_visuals(
+	container: Node,
+	path_index: int,
+	path: PackedVector2Array,
+	left_edges: Array[Vector2],
+	right_edges: Array[Vector2],
+	half_width: float,
+	is_ring: bool
+) -> void:
+	for segment_index in range(path.size() - 1):
+		var start := path[segment_index]
+		var finish := path[segment_index + 1]
+		var segment := finish - start
+		if segment.length_squared() < 1.0:
+			continue
+		var direction := segment.normalized()
+		var skip_segment := not is_ring and _segment_inside_roundabout(start, finish)
+		var start_trim := 0.0 if is_ring else _junction_clearance(start, half_width)
+		var finish_trim := 0.0 if is_ring else _junction_clearance(finish, half_width)
+		if not is_ring and start_trim + finish_trim >= segment.length() - 12.0:
+			continue
+		var start_t := start_trim / segment.length()
+		var finish_t := 1.0 - finish_trim / segment.length()
+		if skip_segment:
+			continue
+		var start_reference := start + direction * start_trim
+		var finish_reference := finish - direction * finish_trim
+		for side_index in range(2):
+			var side := 1.0 if side_index == 0 else -1.0
+			var side_edges: Array[Vector2] = left_edges if side > 0.0 else right_edges
+			var edge_start := side_edges[segment_index].lerp(
+				side_edges[segment_index + 1], start_t
+			)
+			var edge_finish := side_edges[segment_index + 1].lerp(
+				side_edges[segment_index], 1.0 - finish_t
+			)
+			if edge_start.distance_to(edge_finish) <= 12.0:
+				continue
+			var inner_start := edge_start + (start_reference - edge_start).normalized() \
+				* BOUNDARY_BAND_WIDTH
+			var inner_finish := edge_finish + (finish_reference - edge_finish).normalized() \
+				* BOUNDARY_BAND_WIDTH
+			var band := Polygon2D.new()
+			band.name = "SecondaryBoundary_%d_%d_%d" % [path_index, segment_index, side_index]
+			band.polygon = PackedVector2Array([
+				edge_start, edge_finish, inner_finish, inner_start
+			])
+			band.color = Color(0.68, 0.70, 0.70)
+			band.antialiased = false
+			band.add_to_group("secondary_road_outlines")
+			band.set_meta("path_index", path_index)
+			band.set_meta("segment_index", segment_index)
+			band.set_meta("side_index", side_index)
+			band.set_meta("outline_inset", BOUNDARY_BAND_WIDTH)
+			container.add_child(band)
 
 
 func _junction_clearance(point: Vector2, default_half_width: float) -> float:
@@ -1457,9 +1605,9 @@ func _junction_clearance(point: Vector2, default_half_width: float) -> float:
 			return maxf(
 				road_widths[index] * 0.5,
 				_network_half_width_at(point, default_half_width)
-			) + 18.0
+			) + JUNCTION_EDGE_CLEARANCE
 	if _network_point_occurrences(point) > 1:
-		return _network_half_width_at(point, default_half_width) + 18.0
+		return _network_half_width_at(point, default_half_width) + JUNCTION_EDGE_CLEARANCE
 	return 0.0
 
 
@@ -1821,21 +1969,63 @@ func build_boundary_visuals() -> void:
 	if not show_debug_boundaries:
 		return
 
-	# Separate pieces leave a clean opening at every junction. A single Line2D
-	# used to draw a white stroke straight across side roads.
-	for i in range(left_points.size() - 1):
-		if _segment_is_intersection_opening(i):
-			continue
-		for points in [left_points, right_points]:
-			var edge := Line2D.new()
-			edge.width = 4.0
-			edge.default_color = edge_color
-			edge.antialiased = true
-			edge.begin_cap_mode = Line2D.LINE_CAP_ROUND
-			edge.end_cap_mode = Line2D.LINE_CAP_ROUND
-			edge.add_point(points[i])
-			edge.add_point(points[i + 1])
-			container.add_child(edge)
+	# Build a small filled polygon for each asphalt segment. Each outer edge uses
+	# the exact same vertices as the road surface, so there is no long Line2D
+	# interpolation or accumulated offset that can drift away along the route.
+	var inset_left := _inset_boundary_points(left_points, center_points)
+	var inset_right := _inset_boundary_points(right_points, center_points)
+	for segment_index in range(left_points.size() - 1):
+		_add_boundary_band(
+			container,
+			"LeftBoundary_%d" % segment_index,
+			left_points[segment_index], left_points[segment_index + 1],
+			inset_left[segment_index + 1], inset_left[segment_index],
+			edge_color, segment_index, 1.0
+		)
+		_add_boundary_band(
+			container,
+			"RightBoundary_%d" % segment_index,
+			right_points[segment_index], right_points[segment_index + 1],
+			inset_right[segment_index + 1], inset_right[segment_index],
+			edge_color, segment_index, -1.0
+		)
+
+
+func _add_boundary_band(
+	container: Node,
+	node_name: String,
+	outer_start: Vector2,
+	outer_finish: Vector2,
+	inner_finish: Vector2,
+	inner_start: Vector2,
+	color: Color,
+	segment_index: int,
+	boundary_side: float
+) -> void:
+	var band := Polygon2D.new()
+	band.name = node_name
+	band.polygon = PackedVector2Array([
+		outer_start, outer_finish, inner_finish, inner_start
+	])
+	band.color = color
+	band.antialiased = false
+	band.add_to_group("main_road_outlines")
+	band.set_meta("segment_index", segment_index)
+	band.set_meta("boundary_side", boundary_side)
+	band.set_meta("outline_inset", BOUNDARY_BAND_WIDTH)
+	container.add_child(band)
+
+
+func _inset_boundary_points(
+	points: Array[Vector2],
+	centers: Array[Vector2]
+) -> Array[Vector2]:
+	var inset_points: Array[Vector2] = []
+	for index in range(points.size()):
+		var inward := centers[index] - points[index]
+		var inset := minf(BOUNDARY_BAND_WIDTH, inward.length())
+		inset_points.append(points[index] + inward.normalized() * inset)
+	return inset_points
 
 
 func build_debug_centerline() -> void:
@@ -1882,7 +2072,7 @@ func create_collision_chain(
 		return
 
 	for i in range(points.size() - 1):
-		if _segment_is_intersection_opening(i):
+		if _segment_is_intersection_opening(i, outward_sign):
 			continue
 
 		var start := points[i]
@@ -1895,7 +2085,15 @@ func create_collision_chain(
 			continue
 
 		var direction := segment / length
-		var outward := Vector2(-direction.y, direction.x) * outward_sign
+		var outward := Vector2(-direction.y, direction.x)
+		var road_center := (center_points[i] + center_points[i + 1]) * 0.5
+		var edge_center := (start + end) * 0.5
+		# Width tapers and curvature can rotate an edge segment slightly away
+		# from the centerline normal. Resolve its true outside using the matching
+		# road center segment, so collision walls stay on the same side as the
+		# visible edge for both left and right boundaries.
+		if outward.dot(edge_center - road_center) * outward_sign < 0.0:
+			outward = -outward
 
 		var rectangle := RectangleShape2D.new()
 
@@ -1912,10 +2110,19 @@ func create_collision_chain(
 		body.add_child(shape)
 
 
-func _segment_is_intersection_opening(segment_index: int) -> bool:
-	for intersection_index in intersection_indices:
+func _segment_is_intersection_opening(
+	segment_index: int,
+	boundary_side: float = 0.0
+) -> bool:
+	for feature_index in range(intersection_indices.size()):
+		var intersection_index := intersection_indices[feature_index]
 		if absi(segment_index - intersection_index) <= 1:
-			return true
+			var branch_side := float(branch_sides[feature_index])
+			# Four-way junctions open both curbs. A T-junction or roundabout only
+			# opens the curb on the side its connecting road actually enters.
+			if is_zero_approx(branch_side) or is_zero_approx(boundary_side) \
+			or is_equal_approx(branch_side, boundary_side):
+				return true
 
 	return false
 
