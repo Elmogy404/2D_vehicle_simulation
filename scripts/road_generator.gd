@@ -17,7 +17,9 @@ const ROAD_NETWORK := preload("res://scripts/road_network.gd")
 @export var maximum_road_width: float = 280.0
 @export var width_change_smoothing: float = 0.16
 @export_range(3, 6, 1) var intersection_count: int = 4
-@export var cross_street_length: float = 700.0
+## Distance across the whole district between the two collector roads. This
+## leaves real block space between a six-lane arterial and local streets.
+@export var cross_street_length: float = 1300.0
 @export var cross_street_width: float = 190.0
 @export_range(1, 5, 1) var turnaround_count: int = 2
 @export var turnaround_width: float = 360.0
@@ -41,7 +43,10 @@ const ROAD_NETWORK := preload("res://scripts/road_network.gd")
 @export_range(0.01, 1.0, 0.01) var turn_smoothing: float = 0.25
 
 ## Maximum heading (degrees) away from the starting direction.
-@export var max_total_turn: float = 160.0
+## Arterials on real maps bend gradually but rarely fold back through their own
+## parallel collectors inside one district. Local roads provide the tighter
+## turns, so the arterial stays directionally coherent.
+@export var max_total_turn: float = 55.0
 
 ## Number of segments at the start that stay perfectly straight.
 @export var min_straight_segments: int = 3
@@ -208,8 +213,9 @@ func get_branch_sides() -> PackedInt32Array:
 	return branch_sides.duplicate()
 
 
-## Centerlines used by the minimap and future route graph. The first path is
-## always the arterial; later paths are its one-lane branches and roundabouts.
+## Centerlines used by the minimap and route graph. The first path is the
+## arterial; later paths form continuous collectors, connectors, and a
+## roundabout. This is a network rather than one route with decorative stubs.
 func get_map_paths() -> Array[PackedVector2Array]:
 	var paths: Array[PackedVector2Array] = [PackedVector2Array(center_points)]
 
@@ -223,7 +229,7 @@ func get_map_paths() -> Array[PackedVector2Array]:
 		var across := Vector2(-tangent.y, tangent.x)
 		for side in _branch_directions(feature):
 			var outward := across * side
-			var endpoint: Vector2 = center + outward * cross_street_length * 0.5
+			var endpoint: Vector2 = center + outward * _collector_offset_for(feature, side)
 			var branch_endpoint := endpoint
 			if intersection_types[feature] == "roundabout":
 				branch_endpoint = endpoint - outward * 105.0
@@ -238,16 +244,51 @@ func get_map_paths() -> Array[PackedVector2Array]:
 					var angle := (-outward).angle() + TAU * float(step) / 24.0
 					ring.append(endpoint + Vector2.from_angle(angle) * 105.0)
 				paths.append(ring)
-				for exit_side in [-1.0, 1.0]:
-					var exit_direction: Vector2 = tangent * exit_side
-					var exit_path := PackedVector2Array()
-					var exit_start := endpoint + exit_direction * 105.0
-					var exit_end := endpoint + exit_direction * 300.0
-					for exit_step in range(5):
-						exit_path.append(exit_start.lerp(exit_end, float(exit_step) / 4.0))
-					paths.append(exit_path)
+
+	for collector in _collector_paths():
+		paths.append(collector)
 
 	return paths
+
+
+func _collector_paths() -> Array[PackedVector2Array]:
+	var collectors: Array[PackedVector2Array] = []
+
+	for side_value in [-1.0, 1.0]:
+		var side: float = side_value
+		var path := PackedVector2Array()
+		for feature in range(intersection_indices.size()):
+			var index := intersection_indices[feature]
+			var center := center_points[index]
+			var tangent := (center_points[index + 1] - center_points[index - 1]).normalized()
+			var normal := Vector2(-tangent.y, tangent.x)
+			var offset_distance := _collector_offset_for(feature, side)
+			var collector_center: Vector2 = center + normal * offset_distance * side
+
+			if intersection_types[feature] == "roundabout" \
+			and is_equal_approx(float(branch_sides[feature]), side):
+				# The collector joins the circulating lane at two distinct points;
+				# omitting its center keeps the navigation graph out of the island.
+				path.append(collector_center - tangent * 105.0)
+				path.append(collector_center + tangent * 105.0)
+			else:
+				path.append(collector_center)
+
+		collectors.append(path)
+
+	return collectors
+
+
+func _collector_offset_for(feature: int, side: float) -> float:
+	var base := cross_street_length * 0.5
+	# Stable hash-like variation creates irregular block depth without consuming
+	# generator RNG state or changing reproducibility elsewhere.
+	var phase := (
+		float(posmod(seed_value, 100000)) * 0.017
+		+ float(feature) * 2.173
+		+ side * 0.731
+	)
+	return base + sin(phase) * 85.0
 
 
 func get_map_bounds() -> Rect2:
@@ -398,8 +439,8 @@ func generate_road_features() -> void:
 			usable_end
 		)
 		for previous_intersection in intersection_indices:
-			if absi(chosen_intersection - previous_intersection) < 6:
-				chosen_intersection = clampi(previous_intersection + 6, usable_start, usable_end)
+			if absi(chosen_intersection - previous_intersection) < 9:
+				chosen_intersection = clampi(previous_intersection + 9, usable_start, usable_end)
 		intersection_indices.append(chosen_intersection)
 
 		# A compact training map always contains the important junction classes.
@@ -472,7 +513,7 @@ func _safest_branch_side(intersection_index: int) -> int:
 	for candidate_side in [-1, 1]:
 		var endpoint := (
 			center_points[intersection_index]
-			+ across * float(candidate_side) * cross_street_length * 0.5
+			+ across * float(candidate_side) * _collector_offset_for(intersection_indices.size() - 1, float(candidate_side))
 		)
 		var clearance := INF
 		# Ignore the arterial immediately around the junction; it is the intended
@@ -493,7 +534,7 @@ func _safest_branch_side(intersection_index: int) -> int:
 			for previous_side in _branch_directions(previous_feature):
 				var previous_endpoint := (
 					center_points[previous_index]
-					+ previous_across * previous_side * cross_street_length * 0.5
+					+ previous_across * previous_side * _collector_offset_for(previous_feature, previous_side)
 				)
 				clearance = minf(clearance, endpoint.distance_to(previous_endpoint))
 
@@ -539,7 +580,11 @@ func get_max_turn_per_segment() -> float:
 	)
 	# Keep the inner edge well outside the center of curvature. This is stricter
 	# than merely avoiding a mathematical fold and produces believable bends.
-	var min_radius := maxf(widest_road * 0.9, 420.0)
+	# Parallel collector roads are offset from the arterial. The arterial's
+	# radius must remain larger than that offset or an inside collector folds
+	# back into the next block even when the arterial surface itself is valid.
+	var collector_offset := cross_street_length * 0.5 + 90.0
+	var min_radius := maxf(widest_road * 0.9, collector_offset + 420.0)
 	var geometric_limit := rad_to_deg(segment_length / min_radius)
 
 	return minf(max_turn_angle, geometric_limit)
@@ -806,6 +851,9 @@ func build_road_polygon() -> void:
 func build_cross_streets() -> void:
 	var container := _get_or_create("CrossStreets", "Node2D")
 	_clear_children(container)
+	# Collectors are the secondary skeleton and are drawn first. Arterial
+	# connectors and the roundabout then overlap them with clean junctions.
+	_build_collector_network(container)
 
 	for feature in range(intersection_indices.size()):
 		var intersection_index := intersection_indices[feature]
@@ -818,11 +866,11 @@ func build_cross_streets() -> void:
 			- center_points[intersection_index - 1]
 		).normalized()
 		var across := Vector2(-tangent.y, tangent.x)
-		var half_length := cross_street_length * 0.5
 		var half_width := cross_street_width * 0.5
 		var main_half_width: float = road_widths[intersection_index] * 0.5
 
 		for direction in _branch_directions(feature):
+			var half_length := _collector_offset_for(feature, direction)
 			var endpoint: Vector2 = center + across * half_length * direction
 			var polygon := Polygon2D.new()
 			polygon.color = Color(0.115, 0.115, 0.115)
@@ -846,7 +894,9 @@ func build_cross_streets() -> void:
 			var outward := across * direction
 			var wall_endpoint := endpoint
 			if intersection_types[feature] == "roundabout":
-				wall_endpoint -= outward * cross_street_width * 0.92 * 0.72
+				# Stop connector curbs at the outside of the circular apron. Extending
+				# them inward cuts across the circulating lane on sharper seeds.
+				wall_endpoint -= outward * cross_street_width * 0.92
 			_build_branch_walls(
 				container, center, wall_endpoint, tangent, outward,
 				half_width, main_half_width
@@ -854,8 +904,6 @@ func build_cross_streets() -> void:
 
 			if intersection_types[feature] == "roundabout":
 				_build_roundabout(container, endpoint, outward, tangent)
-			else:
-				_build_cul_de_sac(container, endpoint, outward, tangent)
 
 
 func _branch_directions(feature: int) -> Array[float]:
@@ -874,6 +922,7 @@ func _build_branch_walls(
 	main_half_width: float
 ) -> void:
 	var body := StaticBody2D.new()
+	body.name = "BranchWalls_%d_%d" % [roundi(endpoint.x), roundi(endpoint.y)]
 	body.collision_layer = 1
 	body.collision_mask = 2
 	container.add_child(body)
@@ -883,6 +932,131 @@ func _build_branch_walls(
 		var start: Vector2 = center + outward * opening + tangent * half_width * side
 		var end: Vector2 = endpoint + tangent * half_width * side
 		_add_wall_segment(body, start, end)
+
+
+func _build_collector_network(container: Node) -> void:
+	var collectors := _collector_paths()
+	var half_width := cross_street_width * 0.5
+
+	for collector_number in range(collectors.size()):
+		var path := collectors[collector_number]
+		if path.size() < 2:
+			continue
+
+		var body := StaticBody2D.new()
+		body.name = "CollectorWalls_%d" % collector_number
+		body.collision_layer = 1
+		body.collision_mask = 2
+		container.add_child(body)
+
+		for segment_index in range(path.size() - 1):
+			var start := path[segment_index]
+			var finish := path[segment_index + 1]
+			var segment := finish - start
+			if segment.length_squared() < 1.0:
+				continue
+			var direction := segment.normalized()
+			var normal := Vector2(-direction.y, direction.x)
+			var strip := Polygon2D.new()
+			strip.color = Color(0.115, 0.115, 0.115)
+			strip.polygon = PackedVector2Array([
+				start + normal * half_width,
+				finish + normal * half_width,
+				finish - normal * half_width,
+				start - normal * half_width
+			])
+			container.add_child(strip)
+
+			var center_line := Line2D.new()
+			center_line.width = line_width
+			center_line.default_color = Color(0.95, 0.72, 0.12)
+			center_line.add_point(start)
+			center_line.add_point(finish)
+			container.add_child(center_line)
+
+			if _segment_crosses_roundabout(start, finish):
+				continue
+
+			var start_trim := half_width + 20.0 if _collector_point_is_junction(start) else 0.0
+			var finish_trim := half_width + 20.0 if _collector_point_is_junction(finish) else 0.0
+			var wall_start := start + direction * start_trim
+			var wall_finish := finish - direction * finish_trim
+			if wall_start.distance_to(wall_finish) > 10.0:
+				for wall_side in [-1.0, 1.0]:
+					_add_wall_segment(
+						body,
+						wall_start + normal * half_width * wall_side,
+						wall_finish + normal * half_width * wall_side
+					)
+
+		# Rounded asphalt at bends prevents visible seams between segment quads.
+		for point_index in range(1, path.size() - 1):
+			var joint := Polygon2D.new()
+			joint.color = Color(0.115, 0.115, 0.115)
+			joint.polygon = _circle_points(path[point_index], half_width, 16)
+			container.add_child(joint)
+
+		var side := -1.0 if collector_number == 0 else 1.0
+		if not _feature_connects_side(0, side):
+			var start_outward := (path[0] - path[1]).normalized()
+			_build_cul_de_sac(
+				container, path[0], start_outward,
+				Vector2(-start_outward.y, start_outward.x)
+			)
+		var last_feature := intersection_indices.size() - 1
+		if not _feature_connects_side(last_feature, side):
+			var last_index := path.size() - 1
+			var end_outward := (path[last_index] - path[last_index - 1]).normalized()
+			_build_cul_de_sac(
+				container, path[last_index], end_outward,
+				Vector2(-end_outward.y, end_outward.x)
+			)
+
+
+func _feature_connects_side(feature: int, side: float) -> bool:
+	if feature < 0 or feature >= branch_sides.size():
+		return false
+	return branch_sides[feature] == 0 or is_equal_approx(float(branch_sides[feature]), side)
+
+
+func _collector_point_is_junction(point: Vector2) -> bool:
+	for feature in range(intersection_indices.size()):
+		var index := intersection_indices[feature]
+		var center := center_points[index]
+		var tangent := (center_points[index + 1] - center_points[index - 1]).normalized()
+		var normal := Vector2(-tangent.y, tangent.x)
+		for side in _branch_directions(feature):
+			var half_length := _collector_offset_for(feature, side)
+			var endpoint := center + normal * half_length * side
+			if intersection_types[feature] == "roundabout":
+				for approach in [
+					endpoint - normal * side * 105.0,
+					endpoint - tangent * 105.0,
+					endpoint + tangent * 105.0
+				]:
+					if point.distance_squared_to(approach) < 4.0:
+						return true
+			elif point.distance_squared_to(endpoint) < 4.0:
+				return true
+	return false
+
+
+func _segment_crosses_roundabout(start: Vector2, finish: Vector2) -> bool:
+	var midpoint := (start + finish) * 0.5
+	for feature in range(intersection_types.size()):
+		if intersection_types[feature] != "roundabout":
+			continue
+		var index := intersection_indices[feature]
+		var tangent := (center_points[index + 1] - center_points[index - 1]).normalized()
+		var normal := Vector2(-tangent.y, tangent.x)
+		var center := (
+			center_points[index]
+			+ normal * float(branch_sides[feature])
+			* _collector_offset_for(feature, float(branch_sides[feature]))
+		)
+		if midpoint.distance_to(center) < 8.0 and start.distance_to(finish) < 230.0:
+			return true
+	return false
 
 
 func _build_cul_de_sac(
@@ -898,6 +1072,7 @@ func _build_cul_de_sac(
 	container.add_child(bulb)
 
 	var body := StaticBody2D.new()
+	body.name = "CulDeSacWalls_%d_%d" % [roundi(center.x), roundi(center.y)]
 	body.collision_layer = 1
 	body.collision_mask = 2
 	container.add_child(body)
@@ -917,45 +1092,13 @@ func _build_roundabout(
 	apron.polygon = _circle_points(center, outer_radius, 32)
 	container.add_child(apron)
 
-	# Two compact one-lane exits turn the terminal circle into a true
-	# three-arm roundabout instead of a decorative turning bulb.
-	for exit_side in [-1.0, 1.0]:
-		var exit_direction: Vector2 = tangent * exit_side
-		var exit_end := center + exit_direction * 300.0
-		var half_width := cross_street_width * 0.5
-		var spur := Polygon2D.new()
-		spur.color = Color(0.115, 0.115, 0.115)
-		spur.polygon = PackedVector2Array([
-			center - outward * half_width,
-			exit_end - outward * half_width,
-			exit_end + outward * half_width,
-			center + outward * half_width
-		])
-		container.add_child(spur)
-		var center_line := Line2D.new()
-		center_line.width = line_width
-		center_line.default_color = Color(0.95, 0.72, 0.12)
-		center_line.add_point(center + exit_direction * island_radius)
-		center_line.add_point(exit_end)
-		container.add_child(center_line)
-		var spur_body := StaticBody2D.new()
-		spur_body.collision_layer = 1
-		spur_body.collision_mask = 2
-		container.add_child(spur_body)
-		for wall_side in [-1.0, 1.0]:
-			_add_wall_segment(
-				spur_body,
-				center + exit_direction * outer_radius * 0.72 + outward * half_width * wall_side,
-				exit_end + outward * half_width * wall_side
-			)
-		_build_cul_de_sac(container, exit_end, exit_direction, outward)
-
 	var island := Polygon2D.new()
 	island.color = Color(0.16, 0.34, 0.16)
 	island.polygon = _circle_points(center, island_radius, 24)
 	container.add_child(island)
 
 	var body := StaticBody2D.new()
+	body.name = "RoundaboutWalls_%d_%d" % [roundi(center.x), roundi(center.y)]
 	body.collision_layer = 1
 	body.collision_mask = 2
 	container.add_child(body)

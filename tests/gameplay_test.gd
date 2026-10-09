@@ -258,6 +258,10 @@ func run_all() -> void:
 		network.call("graph_is_connected"),
 		"road centerlines form one connected navigation graph"
 	)
+	check(
+		network.call("has_alternate_routes"),
+		"road graph contains real loops and alternate paths"
+	)
 	var graph_positions: Array = network.get("positions")
 	var graph_route: PackedVector2Array = network.call(
 		"find_path", graph_positions[0], graph_positions[graph_positions.size() - 1]

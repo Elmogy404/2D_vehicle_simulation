@@ -40,6 +40,24 @@ func check_seed(road: Node, seed_value: int) -> void:
 		road.get_road_network().call("graph_is_connected"),
 		"seed %d has one connected navigation graph" % seed_value
 	)
+	check(
+		road.get_road_network().call("has_alternate_routes"),
+		"seed %d contains loops and alternate routes" % seed_value
+	)
+	var long_secondary_roads := 0
+	var map_paths: Array[PackedVector2Array] = road.get_map_paths()
+	for path_index in range(1, map_paths.size()):
+		var path_length := 0.0
+		for point_index in range(map_paths[path_index].size() - 1):
+			path_length += map_paths[path_index][point_index].distance_to(
+				map_paths[path_index][point_index + 1]
+			)
+		if path_length > 900.0:
+			long_secondary_roads += 1
+	check(
+		long_secondary_roads >= 2,
+		"seed %d generates multiple continuous secondary roads" % seed_value
+	)
 
 	var strips_valid := true
 	for strip in road.get_node("RoadSurface").get_children():
@@ -54,17 +72,26 @@ func check_seed(road: Node, seed_value: int) -> void:
 	probe.collision_mask = 1
 	probe.collide_with_areas = false
 	var centerlines_clear := true
-	for path in road.get_map_paths():
-		for point in path:
+	var blocked := ""
+	var paths: Array[PackedVector2Array] = road.get_map_paths()
+	for path_index in range(paths.size()):
+		for point_index in range(paths[path_index].size()):
+			var point: Vector2 = paths[path_index][point_index]
 			probe.transform = Transform2D(0.0, point)
-			if not get_world_2d().direct_space_state.intersect_shape(probe, 1).is_empty():
+			var hits: Array[Dictionary] = get_world_2d().direct_space_state.intersect_shape(probe, 1)
+			if not hits.is_empty():
 				centerlines_clear = false
+				var collider: Node = hits[0].get("collider")
+				blocked = " path %d point %d at %s collider %s" % [
+					path_index, point_index, point,
+					collider.get_path() if collider != null else "unknown"
+				]
 				break
 		if not centerlines_clear:
 			break
 	check(
 		centerlines_clear,
-		"seed %d keeps every mapped centerline physically open" % seed_value
+		"seed %d keeps every mapped centerline physically open%s" % [seed_value, blocked]
 	)
 
 

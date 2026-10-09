@@ -108,3 +108,17 @@ func graph_is_connected() -> bool:
 				visited[neighbor] = true
 				queue.append(neighbor)
 	return visited.size() == positions.size()
+
+
+func edge_count() -> int:
+	var directed_total := 0
+	for neighbors in adjacency:
+		directed_total += neighbors.size()
+	return int(directed_total / 2)
+
+
+func has_alternate_routes() -> bool:
+	# A connected undirected graph contains a cycle when E >= V. Cycles are
+	# what make this a street network with alternate paths rather than a tree of
+	# decorative dead ends.
+	return graph_is_connected() and edge_count() >= positions.size()

@@ -48,6 +48,12 @@ This service does not apply controls or change simulation state.
   roundabout branch, and cul-de-sac/dead-end bulbs. The arterial and every side
   road are also represented by one connected `RoadNetwork`, including shortest
   path lookup for the later destination-routing phase.
+- The generated district now uses a real road hierarchy modeled on the
+  recurring structure visible in suburban Google Maps references: one gently
+  curving multi-lane arterial, two continuous one-lane-per-direction collector
+  roads, cross-connectors, irregular block depths, alternate loops, and only a
+  small number of dead ends. Collectors are spaced far enough from the arterial
+  to leave visible city blocks instead of merging into one asphalt mass.
 - Road asphalt is rendered as independent convex strips to avoid concave
   polygon triangulation artifacts on wide curves.
 - Curve radius is constrained using the widest possible road section, keeping
@@ -86,6 +92,7 @@ This service does not apply controls or change simulation state.
 
 This milestone includes deterministic mixed-road geometry, signals,
 pedestrians, priority merges, reverse driving, exploration UI, and a connected
-navigation graph. Current NPC traffic continues along the primary route; a
-future traffic-routing phase can assign destinations across the existing graph.
-Weather/surface conditions and training systems remain separate phases.
+navigation graph with actual alternate road loops. Current NPC traffic follows
+the arterial; a future traffic-routing phase can assign destinations across the
+existing graph. Weather/surface conditions and training systems remain separate
+phases.
