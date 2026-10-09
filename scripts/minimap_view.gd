@@ -2,11 +2,13 @@ extends Control
 
 
 @export var exploration_radius: float = 360.0
+@export var reveal_entire_map: bool = true
 
 var road: Node
 var ego: Node2D
 var paths: Array[PackedVector2Array] = []
 var discovered: Array[PackedByteArray] = []
+var obstacles: Array[Dictionary] = []
 var map_bounds := Rect2(Vector2.ZERO, Vector2.ONE)
 
 
@@ -25,23 +27,28 @@ func set_sources(new_road: Node, new_ego: Node2D) -> void:
 func reset_map() -> void:
 	paths.clear()
 	discovered.clear()
+	obstacles.clear()
 	if road == null:
 		return
 
 	paths = road.get_map_paths()
+	obstacles = road.get_obstacle_regions()
 	map_bounds = road.get_map_bounds()
 	for path in paths:
 		var flags := PackedByteArray()
 		flags.resize(path.size())
+		if reveal_entire_map:
+			flags.fill(1)
 		discovered.append(flags)
-	_reveal_near_ego()
+	if not reveal_entire_map:
+		_reveal_near_ego()
 	queue_redraw()
 
 
 func _process(_delta: float) -> void:
 	if ego == null or not is_instance_valid(ego):
 		return
-	if _reveal_near_ego():
+	if not reveal_entire_map and _reveal_near_ego():
 		queue_redraw()
 	else:
 		# The player marker and nearby traffic still move on revealed roads.
@@ -75,6 +82,20 @@ func _draw() -> void:
 		12,
 		Color(0.76, 0.84, 0.88)
 	)
+	for obstacle in obstacles:
+		var center: Vector2 = obstacle["center"]
+		var obstacle_size: Vector2 = obstacle["size"]
+		var rotation: float = obstacle["rotation"]
+		var tangent := Vector2.from_angle(rotation)
+		var normal := Vector2(-tangent.y, tangent.x)
+		var half_x := tangent * obstacle_size.x * 0.5
+		var half_y := normal * obstacle_size.y * 0.5
+		draw_colored_polygon(PackedVector2Array([
+			_world_to_map(center - half_x - half_y),
+			_world_to_map(center + half_x - half_y),
+			_world_to_map(center + half_x + half_y),
+			_world_to_map(center - half_x + half_y)
+		]), Color(0.13, 0.31, 0.16))
 
 	for path_index in range(paths.size()):
 		var path := paths[path_index]

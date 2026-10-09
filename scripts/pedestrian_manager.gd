@@ -7,6 +7,7 @@ const PedestrianScript = preload("res://scripts/pedestrian.gd")
 @export var minimum_speed: float = 38.0
 @export var maximum_speed: float = 62.0
 @export var curb_margin: float = 30.0
+@export var side_road_clearance: float = 24.0
 
 var pedestrians: Array[Node] = []
 var road_generator: Node
@@ -35,9 +36,19 @@ func regenerate() -> void:
 		var tangent := route.get_direction_at(progress)
 		var half_width := route.get_half_width_at(progress)
 		var linked_light: Node = light_manager.light_for_progress(progress)
+		var side_road_half_width: float = float(road_generator.get("cross_street_width")) * 0.5
 
 		for pedestrian_index in range(pedestrians_per_intersection):
-			var along_offset := (float(pedestrian_index) - float(pedestrians_per_intersection - 1) * 0.5) * 28.0
+			# Cross beside the junction instead of waiting in the side-road mouth.
+			# Alternating sides spreads groups over the two marked crosswalks while
+			# keeping every curb endpoint clear of local traffic lanes.
+			var crossing_side := -1.0 if pedestrian_index % 2 == 0 else 1.0
+			var row := int(pedestrian_index / 2)
+			var along_offset := crossing_side * (
+				side_road_half_width
+				+ side_road_clearance
+				+ float(row) * 26.0
+			)
 			var start := center - normal * (half_width + curb_margin) + tangent * along_offset
 			var finish := center + normal * (half_width + curb_margin) + tangent * along_offset
 			var pedestrian := PedestrianScript.new() as CharacterBody2D

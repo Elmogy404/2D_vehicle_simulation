@@ -189,7 +189,7 @@ func run_all() -> void:
 		"roundabout uses circulating priority instead of a traffic signal"
 	)
 	check(
-		light_snapshot.size() == signal_indices.size() - 1,
+		light_snapshot.size() == signal_indices.size() - signal_types.count("roundabout"),
 		"all signalized junctions receive one seeded traffic-light phase"
 	)
 
@@ -230,8 +230,9 @@ func run_all() -> void:
 		"road surface uses artifact-free convex strips"
 	)
 	check(
-		road.get_intersection_indices().size() == int(road.get("intersection_count")),
-		"seeded intersections were generated"
+		road.get_intersection_indices().size()
+		== int(road.get_layout_summary()["intersections"]),
+		"seeded variable-count intersections were generated"
 	)
 	check(
 		road.get_turnaround_indices().size() == int(road.get("turnaround_count")),
@@ -240,6 +241,11 @@ func run_all() -> void:
 	check(
 		road.get_node("CrossStreets").get_child_count() > 0,
 		"intersections have traversable cross-street geometry"
+	)
+	check(
+		road.get_obstacle_regions().size() > 0
+		and road.get_node("ObstacleAreas").get_child_count() > 0,
+		"labeled obstacle regions were generated and rendered"
 	)
 
 	var junction_types: PackedStringArray = road.get_intersection_types()
@@ -310,8 +316,13 @@ func run_all() -> void:
 		"minimap is anchored in the top-left corner"
 	)
 	check(
-		reveal_count > 0 and reveal_count < point_count,
-		"minimap starts with only nearby roads uncovered"
+		reveal_count == point_count,
+		"minimap displays the complete generated road network"
+	)
+	var minimap_obstacles: Array = minimap_view.get("obstacles")
+	check(
+		minimap_obstacles.size() == road.get_obstacle_regions().size(),
+		"minimap includes every generated obstacle region"
 	)
 
 	var pedestrians: Array = pedestrian_manager.get("pedestrians")
@@ -332,6 +343,28 @@ func run_all() -> void:
 			pedestrian_layers_ok = false
 
 	check(pedestrian_layers_ok, "pedestrians use dedicated collision layers")
+
+	var pedestrian_waiting_zones_clear := true
+	var pedestrians_per_intersection := int(pedestrian_manager.get("pedestrians_per_intersection"))
+	var side_road_half_width := float(road.get("cross_street_width")) * 0.5
+	var required_side_clearance := float(pedestrian_manager.get("side_road_clearance"))
+	var route: RoutePath = road.get_route()
+	var intersection_indices: PackedInt32Array = road.get_intersection_indices()
+	for pedestrian_index in range(pedestrians.size()):
+		var intersection_number := int(pedestrian_index / pedestrians_per_intersection)
+		var route_index := intersection_indices[intersection_number]
+		var progress := float(route.cumulative[route_index])
+		var center := route.get_position_at(progress)
+		var tangent := route.get_direction_at(progress)
+		var endpoint: Vector2 = pedestrians[pedestrian_index].get("endpoint_a")
+		var along_offset := absf((endpoint - center).dot(tangent))
+		if along_offset < side_road_half_width + required_side_clearance - 1.0:
+			pedestrian_waiting_zones_clear = false
+			break
+	check(
+		pedestrian_waiting_zones_clear,
+		"pedestrians wait beside side-road mouths instead of blocking them"
+	)
 
 	if not pedestrians.is_empty():
 		var pedestrian: CharacterBody2D = pedestrians[0]

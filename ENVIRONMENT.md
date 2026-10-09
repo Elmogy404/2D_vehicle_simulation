@@ -44,16 +44,23 @@ This service does not apply controls or change simulation state.
   direction. Width, lane centers, and divider markings share the same smooth
   transition data, producing finite tapered lane additions and merges separated
   by constant-width road sections.
-- The compact map guarantees a seeded T-junction, four-way intersection,
-  roundabout branch, and cul-de-sac/dead-end bulbs. The arterial and every side
-  road are also represented by one connected `RoadNetwork`, including shortest
-  path lookup for the later destination-routing phase.
-- The generated district now uses a real road hierarchy modeled on the
-  recurring structure visible in suburban Google Maps references: one gently
-  curving multi-lane arterial, two continuous one-lane-per-direction collector
-  roads, cross-connectors, irregular block depths, alternate loops, and only a
-  small number of dead ends. Collectors are spaced far enough from the arterial
-  to leave visible city blocks instead of merging into one asphalt mass.
+- Each seed independently randomizes map length, density, irregularity, road
+  count on either side, block spacing, junction count and order, partial road
+  extents, local loops, diagonals, lane widths, and obstacle placement. Every
+  map still guarantees at least one T-junction, four-way intersection, curved
+  section, roundabout, and alternate route.
+- Every road is represented by one connected `RoadNetwork`, including
+  shortest-path lookup for the later destination-routing phase. Identical seeds
+  reproduce the complete topology for debugging; different seeds do not reuse
+  one fixed street template.
+- The generated district uses a variable hierarchy: a gently curving multi-lane
+  arterial, asymmetric collector/local corridors, cross streets, partial roads,
+  diagonal shortcuts, neighborhood loops, perimeter connections, irregular
+  blocks, and dead ends. The primary road's endpoints connect into perimeter
+  streets, so the result has no designated level start or finish.
+- Green, labeled `PARK`, `LAKE`, `FIELD`, `CONSTRUCTION`, `RESTRICTED AREA`, and
+  `INDUSTRIAL SITE` regions occupy validated road-free blocks. They use simple
+  collision geometry rather than art assets and also appear on the minimap.
 - Road asphalt is rendered as independent convex strips to avoid concave
   polygon triangulation artifacts on wide curves.
 - Curve radius is constrained using the widest possible road section, keeping
@@ -70,13 +77,14 @@ This service does not apply controls or change simulation state.
 - At a narrowing, the outside lane signals, checks both the front and rear gap,
   and merges gradually. The continuing lane always has priority; if a gap is
   unsafe the merging vehicle stops before its lane ends.
-- Seeded pedestrians wait at curbs and cross while vehicle traffic is red.
+- Seeded pedestrians wait on curb areas beside side-road mouths and cross while
+  vehicle traffic is red, leaving the local-road travel lanes unobstructed.
 - Vehicle spawns search for a valid active lane and avoid intersection conflict
   zones. Pedestrians ignore vehicle bodies while walking so an accidental
   overlap cannot deadlock both actors; vehicles still detect and stop for them.
 - Vehicle sensors detect road boundaries, traffic, and pedestrians.
-- The top-left minimap uncovers roads only as the player explores them. Press
-  `M` to toggle its expanded view.
+- The top-left minimap fits and displays the complete generated road network.
+  Press `M` to toggle its expanded view.
 - The keyboard transmission uses `W` for drive and `S` for brake/reverse. `S`
   must bring the car to a stop before reverse engages, and reverse has its own
   lower speed/acceleration limits. The speed HUD shows the live gear.

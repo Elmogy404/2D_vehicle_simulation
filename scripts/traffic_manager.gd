@@ -382,10 +382,9 @@ func get_ego_spawn_pose() -> Dictionary:
 
 	var lane: Dictionary = lanes[0]
 
-	var distance: float = minf(
-		first_spawn_distance * 0.5,
-		route.length * 0.5
-	)
+	# Spawn inside the district rather than at a route endpoint. The arterial's
+	# ends are ordinary perimeter junctions, not a level start or finish.
+	var distance: float = route.length * 0.5
 
 	return {
 		"position": route.get_position_at(
