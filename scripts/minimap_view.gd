@@ -10,6 +10,10 @@ var paths: Array[PackedVector2Array] = []
 var discovered: Array[PackedByteArray] = []
 var obstacles: Array[Dictionary] = []
 var map_bounds := Rect2(Vector2.ZERO, Vector2.ONE)
+var goal_position := Vector2.ZERO
+var show_goal: bool = false
+var planned_route := PackedVector2Array()
+var show_planned_route: bool = false
 
 
 func _ready() -> void:
@@ -42,6 +46,20 @@ func reset_map() -> void:
 		discovered.append(flags)
 	if not reveal_entire_map:
 		_reveal_near_ego()
+	queue_redraw()
+
+
+func set_goal_position(position: Vector2, enabled: bool) -> void:
+	goal_position = position
+	show_goal = enabled
+	queue_redraw()
+
+
+func set_planned_route(points: Array, enabled: bool) -> void:
+	planned_route.clear()
+	for point in points:
+		planned_route.append(point)
+	show_planned_route = enabled and planned_route.size() >= 2
 	queue_redraw()
 
 
@@ -111,6 +129,17 @@ func _draw() -> void:
 				4.0 if path_index == 0 else 3.0,
 				true
 			)
+
+	if show_planned_route:
+		var route_on_map := PackedVector2Array()
+		for point in planned_route:
+			route_on_map.append(_world_to_map(point))
+		draw_polyline(route_on_map, Color(0.18, 0.9, 1.0, 0.95), 2.5, true)
+
+	if show_goal:
+		var goal := _world_to_map(goal_position)
+		draw_circle(goal, 5.0, Color(0.18, 0.95, 0.52))
+		draw_arc(goal, 8.0, 0.0, TAU, 24, Color(0.55, 1.0, 0.72), 2.0)
 
 	if ego != null and is_instance_valid(ego):
 		var player := _world_to_map(ego.global_position)

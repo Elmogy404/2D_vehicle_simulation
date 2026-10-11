@@ -243,7 +243,7 @@ func generate_road() -> void:
 		route_half_widths.append(width * 0.5)
 
 	route.build(center_points, route_half_widths, lane_profile, lane_width)
-	road_network.build(get_map_paths())
+	road_network.build(get_map_paths(), get_map_path_half_width_profiles())
 
 	build_road_polygon()
 	# Lay the continuous main-road curbs before side-street asphalt. Junction
@@ -280,6 +280,23 @@ func get_map_paths() -> Array[PackedVector2Array]:
 		paths.append(path)
 
 	return paths
+
+
+func get_map_path_half_width_profiles() -> Array[PackedFloat32Array]:
+	var profiles: Array[PackedFloat32Array] = []
+	var main_profile := PackedFloat32Array()
+	for width in road_widths:
+		main_profile.append(width * 0.5)
+	profiles.append(main_profile)
+	for path_index in range(secondary_paths.size()):
+		var half_width := 80.0
+		if path_index < secondary_path_widths.size():
+			half_width = secondary_path_widths[path_index] * 0.5
+		var profile := PackedFloat32Array()
+		for _point in secondary_paths[path_index]:
+			profile.append(half_width)
+		profiles.append(profile)
+	return profiles
 
 
 func _collector_offset_for(feature: int, side: float) -> float:

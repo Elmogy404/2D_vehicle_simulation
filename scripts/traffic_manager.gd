@@ -73,6 +73,7 @@ var lanes: Array[Dictionary] = []
 var route: RoutePath
 
 var traffic_cars: Array[Node] = []
+var traffic_enabled: bool = true
 
 const TRAFFIC_TEXTURES: Array[Texture2D] = [
 	preload("res://assets/random cars/car_blue_1.png"),
@@ -176,6 +177,8 @@ func spawn_traffic() -> void:
 	clear_traffic()
 
 	route = road_generator.get_route()
+	if not traffic_enabled:
+		return
 
 	if route == null or not route.is_valid():
 		push_warning("Road is too short for traffic.")
@@ -421,3 +424,11 @@ func regenerate() -> void:
 	setup_rng()
 
 	spawn_traffic()
+
+
+func set_traffic_enabled(enabled: bool) -> void:
+	traffic_enabled = enabled
+	if enabled:
+		regenerate()
+	else:
+		clear_traffic()

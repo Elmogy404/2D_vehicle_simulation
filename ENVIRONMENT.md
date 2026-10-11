@@ -1,7 +1,9 @@
 # Driving Environment Foundation
 
 The simulation deliberately keeps driving policy separate from vehicle physics.
-No AI, reward function, training loop, or automatic driving policy is included.
+The playable main scene has no automatic driving policy. A separate initial PPO
+training setup is documented in `ai/README.md`; the staged AI plan is in
+`AI_ROADMAP.md`.
 
 ## Control contract
 

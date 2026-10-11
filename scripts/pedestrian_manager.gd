@@ -26,6 +26,7 @@ var road_generator: Node
 var light_manager: Node
 var rng := RandomNumberGenerator.new()
 var crosswalks: Node2D
+var pedestrians_enabled: bool = true
 
 
 func _ready() -> void:
@@ -38,6 +39,8 @@ func _ready() -> void:
 func regenerate() -> void:
 	clear_pedestrians()
 	_clear_crosswalks()
+	if not pedestrians_enabled:
+		return
 	crosswalks = Node2D.new()
 	crosswalks.name = "Crosswalks"
 	add_child(crosswalks)
@@ -152,3 +155,12 @@ func clear_pedestrians() -> void:
 			pedestrian.get_parent().remove_child(pedestrian)
 		pedestrian.queue_free()
 	pedestrians.clear()
+
+
+func set_pedestrians_enabled(enabled: bool) -> void:
+	pedestrians_enabled = enabled
+	if enabled:
+		regenerate()
+	else:
+		clear_pedestrians()
+		_clear_crosswalks()

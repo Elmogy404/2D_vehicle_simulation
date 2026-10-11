@@ -12,6 +12,7 @@ var road_generator: Node
 var lights: Array[Node] = []
 var light_feature_indices: PackedInt32Array = PackedInt32Array()
 var rng := RandomNumberGenerator.new()
+var lights_enabled: bool = true
 signal lights_regenerated
 
 
@@ -23,6 +24,9 @@ func _ready() -> void:
 
 func regenerate() -> void:
 	clear_lights()
+	if not lights_enabled:
+		lights_regenerated.emit()
+		return
 	rng.seed = seed_value
 	var route: RoutePath = road_generator.get_route()
 
@@ -100,3 +104,8 @@ func progress_snapshot() -> PackedFloat32Array:
 		result.append(light.progress)
 
 	return result
+
+
+func set_lights_enabled(enabled: bool) -> void:
+	lights_enabled = enabled
+	regenerate()
