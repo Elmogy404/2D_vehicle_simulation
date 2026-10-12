@@ -4,9 +4,11 @@
 [ext_resource type="Script" uid="uid://1ahgei8l3aae" path="res://scripts/traffic_car.gd" id="1_w8xan"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_w8xan"]
-size = Vector2(80, 144)
+size = Vector2(62, 122)
 
 [node name="TrafficCar" type="CharacterBody2D" unique_id=1479023007]
+collision_layer = 2
+collision_mask = 7
 script = ExtResource("1_w8xan")
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=812780949]

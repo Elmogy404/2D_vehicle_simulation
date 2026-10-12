@@ -7,6 +7,24 @@ extends CharacterBody2D
 @export var acceleration: float = 250.0
 @export var braking: float = 500.0
 
+## Reverse deliberately has a lower ceiling and gentler acceleration than
+## forward driving. The brake pedal only selects reverse after the vehicle has
+## come to a complete stop, matching an automatic transmission.
+@export var max_reverse_speed: float = 95.0
+@export var reverse_acceleration: float = 150.0
+@export var direction_change_threshold: float = 2.0
+
+## Passive rolling resistance when neither pedal is pressed.
+@export var coast_deceleration: float = 75.0
+
+## Axle-to-axle distance used by the kinematic bicycle model.
+@export var wheelbase: float = 92.0
+
+## Physical body dimensions, matching the inset collision shape rather than
+## the transparent outer edge of the sprite.
+@export var vehicle_width: float = 62.0
+@export var vehicle_length: float = 122.0
+
 @export var steering_speed: float = 2.5
 @export var max_steering_angle: float = 35.0
 
@@ -21,6 +39,14 @@ extends CharacterBody2D
 
 var current_speed: float = 0.0
 var steering_input: float = 0.0
+var steering_command: float = 0.0
+var throttle_input: float = 0.0
+var brake_input: float = 0.0
+
+# A controller may inject commands explicitly. When disabled, commands are
+# read from any child exposing get_control_command().
+var external_control_enabled: bool = false
+var control_source: Node
 
 # Crash state. The vehicle itself owns collision detection;
 # HUD and Game Over only READ it (see AGENT.md architecture).
@@ -36,6 +62,7 @@ func _ready() -> void:
 	# NPCs treat the ego as a lane obstacle. This is a
 	# read-only tag: ego control stays independent.
 	add_to_group("vehicle_obstacle")
+	control_source = get_node_or_null("KeyboardController")
 
 
 func _physics_process(delta: float) -> void:
@@ -46,38 +73,53 @@ func _physics_process(delta: float) -> void:
 	# --------------------------------------------------------
 	# INPUT
 	# --------------------------------------------------------
-	var throttle := Input.get_axis(
-		"brake",
-		"accelerate"
-	)
-
-	var steering := Input.get_axis(
-		"steer_left",
-		"steer_right"
-	)
+	if not external_control_enabled and control_source != null:
+		if control_source.has_method("get_control_command"):
+			var command: Vector3 = control_source.get_control_command()
+			set_control(command.x, command.y, command.z, false)
 
 
 	# --------------------------------------------------------
 	# ACCELERATION / BRAKING
 	# --------------------------------------------------------
 
-	if throttle > 0.0:
-		current_speed += acceleration * throttle * delta
+	# Braking wins when both pedals are commanded. S first brakes a forward
+	# moving car, then engages reverse on a later physics tick after it stops.
+	if brake_input > 0.0:
+		if current_speed > direction_change_threshold:
+			current_speed = move_toward(
+				current_speed,
+				0.0,
+				braking * brake_input * delta
+			)
+		elif current_speed > 0.0:
+			current_speed = 0.0
+		else:
+			current_speed -= reverse_acceleration * brake_input * delta
 
-	elif throttle < 0.0:
-		current_speed -= braking * abs(throttle) * delta
+	elif throttle_input > 0.0:
+		if current_speed < -direction_change_threshold:
+			current_speed = move_toward(
+				current_speed,
+				0.0,
+				braking * throttle_input * delta
+			)
+		elif current_speed < 0.0:
+			current_speed = 0.0
+		else:
+			current_speed += acceleration * throttle_input * delta
 
 	else:
 		current_speed = move_toward(
 			current_speed,
 			0.0,
-			acceleration * 0.3 * delta
+			coast_deceleration * delta
 		)
 
 
 	current_speed = clamp(
 		current_speed,
-		0.0,
+		-max_reverse_speed,
 		max_speed
 	)
 
@@ -88,7 +130,7 @@ func _physics_process(delta: float) -> void:
 
 	steering_input = move_toward(
 		steering_input,
-		steering,
+		steering_command,
 		steering_speed * delta
 	)
 
@@ -97,18 +139,17 @@ func _physics_process(delta: float) -> void:
 	# VEHICLE ROTATION
 	# --------------------------------------------------------
 
-	if current_speed > 1.0:
+	if absf(current_speed) > 1.0:
 		var steering_angle := (
 			steering_input
 			* deg_to_rad(max_steering_angle)
 		)
 
-		rotation += (
-			steering_angle
-			* current_speed
-			/ max_speed
-			* delta
+		var yaw_rate := (
+			current_speed / maxf(wheelbase, 1.0)
+			* tan(steering_angle)
 		)
+		rotation += yaw_rate * delta
 
 
 	# --------------------------------------------------------
@@ -118,7 +159,7 @@ func _physics_process(delta: float) -> void:
 	# Speed at the instant before the move, so a collision
 	# reports the real impact speed (velocity is altered by
 	# move_and_slide() during the contact itself).
-	var impact_speed := current_speed
+	var impact_speed := absf(current_speed)
 
 	velocity = (
 		Vector2.UP.rotated(rotation)
@@ -153,7 +194,35 @@ func reset_vehicle() -> void:
 	crash_speed = 0.0
 	current_speed = 0.0
 	steering_input = 0.0
+	steering_command = 0.0
+	throttle_input = 0.0
+	brake_input = 0.0
 	velocity = Vector2.ZERO
+	external_control_enabled = false
+
+
+## Controller-neutral command API. Values are normalized to 0..1 for pedals
+## and -1..1 for steering. Passing external=false is reserved for adapters.
+func set_control(
+	throttle: float,
+	brake_amount: float,
+	steering: float,
+	external: bool = true
+) -> void:
+	throttle_input = clampf(throttle, 0.0, 1.0)
+	brake_input = clampf(brake_amount, 0.0, 1.0)
+	steering_command = clampf(steering, -1.0, 1.0)
+
+	if external:
+		external_control_enabled = true
+
+
+func use_default_controller() -> void:
+	external_control_enabled = false
+	throttle_input = 0.0
+	brake_input = 0.0
+	steering_input = 0.0
+	steering_command = 0.0
 
 
 ## Live speed for the HUD (reads actual physics velocity).
@@ -164,3 +233,11 @@ func get_speed_kmh() -> float:
 ## Impact speed for the Game Over screen.
 func get_crash_kmh() -> float:
 	return crash_speed * kmh_per_unit
+
+
+func get_gear_label() -> String:
+	if current_speed < -direction_change_threshold:
+		return "R"
+	if current_speed > direction_change_threshold:
+		return "D"
+	return "N"

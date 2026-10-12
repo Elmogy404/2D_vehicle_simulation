@@ -2,3 +2,9 @@
 .godot/
 /android/
 .opencode
+ai/.venv/
+.venv-ai/
+ai/models/
+ai/runs/
+__pycache__/
+*.py[cod]

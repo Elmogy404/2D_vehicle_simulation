@@ -32,12 +32,12 @@ extends Node2D
 @export_category("Lanes")
 
 ## Lanes in each direction (1 = one lane each way).
-@export var lanes_per_direction: int = 1
+@export var lanes_per_direction: int = 3
 
 ## Vehicle dimensions used to keep spawn points and lane
 ## offsets physically valid.
-@export var vehicle_width: float = 80.0
-@export var vehicle_length: float = 144.0
+@export var vehicle_width: float = 62.0
+@export var vehicle_length: float = 122.0
 
 ## Distance along the route where the first cars spawn.
 @export var first_spawn_distance: float = 400.0
@@ -73,6 +73,19 @@ var lanes: Array[Dictionary] = []
 var route: RoutePath
 
 var traffic_cars: Array[Node] = []
+var traffic_enabled: bool = true
+
+const TRAFFIC_TEXTURES: Array[Texture2D] = [
+	preload("res://assets/random cars/car_blue_1.png"),
+	preload("res://assets/random cars/car_blue_2.png"),
+	preload("res://assets/random cars/car_blue_3.png")
+]
+
+const TRAFFIC_BODY_SIZES: Array[Vector2] = [
+	Vector2(62.0, 122.0),
+	Vector2(62.0, 108.0),
+	Vector2(62.0, 122.0)
+]
 
 
 # ============================================================
@@ -124,11 +137,7 @@ func lane_count() -> int:
 func build_lanes() -> void:
 	lanes.clear()
 
-	var road_width: float = road_generator.get("road_width")
-
-	var width_per_lane: float = (
-		road_width / float(lane_count())
-	)
+	var width_per_lane: float = float(road_generator.get("lane_width"))
 
 	if vehicle_width > width_per_lane:
 		push_warning(
@@ -153,7 +162,8 @@ func build_lanes() -> void:
 			lanes.append({
 				"id": id,
 				"offset": offset,
-				"direction": direction
+				"direction": direction,
+				"index": i
 			})
 
 			id += 1
@@ -167,6 +177,8 @@ func spawn_traffic() -> void:
 	clear_traffic()
 
 	route = road_generator.get_route()
+	if not traffic_enabled:
+		return
 
 	if route == null or not route.is_valid():
 		push_warning("Road is too short for traffic.")
@@ -192,19 +204,29 @@ func spawn_traffic() -> void:
 		)
 
 		spawn_distance = fmod(spawn_distance, route.length)
+		var spawn_pose := find_clear_spawn_pose(spawn_distance, lane)
 
-
-		if not is_spawn_clear(
-			spawn_distance,
-			float(lane["offset"]),
-			int(lane["id"])
-		):
+		if spawn_pose.is_empty():
 			continue
+
+		spawn_distance = float(spawn_pose["progress"])
+		var spawn_offset: float = float(spawn_pose["offset"])
 
 
 		var car: Node = traffic_car_scene.instantiate()
 
 		add_child(car)
+
+		# Visual variety is deterministic and collider geometry follows the
+		# selected sprite. It consumes no RNG, so seeded speed assignments stay
+		# backward-compatible.
+		var variant: int = i % TRAFFIC_TEXTURES.size()
+
+		if car.has_method("configure_visual"):
+			car.configure_visual(
+				TRAFFIC_TEXTURES[variant],
+				TRAFFIC_BODY_SIZES[variant]
+			)
 
 
 		var speed: float = rng.randf_range(
@@ -217,7 +239,8 @@ func spawn_traffic() -> void:
 			car.setup(
 				route,
 				int(lane["id"]),
-				float(lane["offset"]),
+				int(lane["index"]),
+				spawn_offset,
 				float(lane["direction"]),
 				spawn_distance,
 				speed
@@ -231,6 +254,40 @@ func spawn_traffic() -> void:
 			)
 
 			car.queue_free()
+
+
+func find_clear_spawn_pose(start_distance: float, lane: Dictionary) -> Dictionary:
+	var candidate := start_distance
+	var step := maxf(float(road_generator.get("segment_length")), 30.0)
+	var attempts := ceili(route.length / step)
+	var lane_index: int = int(lane["index"])
+	var lane_direction: float = float(lane["direction"])
+	var lane_id: int = int(lane["id"])
+
+	for attempt in range(attempts):
+		if route.get_lane_count_at(candidate) > lane_index:
+			var offset := route.get_lane_offset_at(candidate, lane_index, lane_direction)
+
+			if not is_near_intersection(candidate) and is_spawn_clear(
+				candidate,
+				offset,
+				lane_id
+			):
+				return {"progress": candidate, "offset": offset}
+
+		candidate = fposmod(candidate + step, route.length)
+
+	return {}
+
+
+func is_near_intersection(candidate: float) -> bool:
+	for index in road_generator.get_intersection_indices():
+		var feature_progress: float = float(route.cumulative[index])
+
+		if absf(feature_progress - candidate) < vehicle_length * 1.5:
+			return true
+
+	return false
 
 
 # Never drop a car on top of another one. Vehicles in OTHER
@@ -328,10 +385,9 @@ func get_ego_spawn_pose() -> Dictionary:
 
 	var lane: Dictionary = lanes[0]
 
-	var distance: float = minf(
-		first_spawn_distance * 0.5,
-		route.length * 0.5
-	)
+	# Spawn inside the district rather than at a route endpoint. The arterial's
+	# ends are ordinary perimeter junctions, not a level start or finish.
+	var distance: float = route.length * 0.5
 
 	return {
 		"position": route.get_position_at(
@@ -368,3 +424,11 @@ func regenerate() -> void:
 	setup_rng()
 
 	spawn_traffic()
+
+
+func set_traffic_enabled(enabled: bool) -> void:
+	traffic_enabled = enabled
+	if enabled:
+		regenerate()
+	else:
+		clear_traffic()

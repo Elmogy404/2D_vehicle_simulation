@@ -133,11 +133,323 @@ func run_all() -> void:
 	traffic = main.get_node("TrafficManager")
 	hud = main.get_node("SpeedHud")
 	game_over = main.get_node("GameOver")
+	var light_manager: Node = main.get_node("TrafficLightManager")
+	var pedestrian_manager: Node = main.get_node("PedestrianManager")
+	var environment_state: Node = main.get_node("EnvironmentState")
 
 	check(
 		hud != null and game_over != null,
 		"HUD and Game Over nodes exist"
 	)
+
+	check(
+		environment_state != null,
+		"read-only environment state exists"
+	)
+
+	check(
+		ego.collision_layer == 2 and ego.collision_mask == 7,
+		"ego detects world, vehicles, and pedestrians"
+	)
+
+	var ego_camera: Camera2D = ego.get_node("Camera2D")
+
+	check(ego_camera.is_current(), "gameplay camera follows the ego by default")
+	check(
+		ego_camera.position_smoothing_enabled,
+		"ego camera uses position smoothing"
+	)
+
+	# --------------------------------------------------------
+	# SEEDED TRAFFIC LIGHTS
+	# --------------------------------------------------------
+	print("== Traffic lights ==")
+
+	var light_snapshot: PackedFloat32Array = light_manager.progress_snapshot()
+
+	check(
+		light_snapshot.size() >= int(light_manager.get("minimum_lights")),
+		"random traffic lights were generated"
+	)
+
+	light_manager.regenerate()
+
+	check(
+		light_manager.progress_snapshot() == light_snapshot,
+		"same light seed reproduces identical positions"
+	)
+	var signal_types: PackedStringArray = road.get_intersection_types()
+	var signal_indices: PackedInt32Array = road.get_intersection_indices()
+	var roundabout_feature := signal_types.find("roundabout")
+	var roundabout_progress: float = float(
+		road.get_route().cumulative[signal_indices[roundabout_feature]]
+	)
+	check(
+		light_manager.light_for_progress(roundabout_progress) == null,
+		"roundabout uses circulating priority instead of a traffic signal"
+	)
+	check(
+		light_snapshot.size() == signal_indices.size() - signal_types.count("roundabout"),
+		"all signalized junctions receive one seeded traffic-light phase"
+	)
+
+	# --------------------------------------------------------
+	# COMPLEX ROAD + PEDESTRIANS
+	# --------------------------------------------------------
+	print("== Road features and pedestrians ==")
+
+	var widths: PackedFloat32Array = road.get_width_profile()
+	var width_min: float = INF
+	var width_max: float = 0.0
+
+	for width in widths:
+		width_min = minf(width_min, width)
+		width_max = maxf(width_max, width)
+
+	check(width_max - width_min > 25.0, "road widens and narrows")
+
+	var lane_profile: PackedFloat32Array = road.get_lane_profile()
+	var minimum_lanes: int = 99
+	var maximum_lanes: int = 0
+
+	for lane_value in lane_profile:
+		minimum_lanes = mini(minimum_lanes, maxi(1, int(floor(lane_value + 0.05))))
+		maximum_lanes = maxi(maximum_lanes, maxi(1, int(floor(lane_value + 0.05))))
+
+	check(
+		minimum_lanes == 1 and maximum_lanes == 3,
+		"main road transitions between 1 and 3 lanes per direction"
+	)
+	check(
+		road.get_node("Road").polygon.is_empty(),
+		"legacy concave road polygon is disabled"
+	)
+	check(
+		road.get_node("RoadSurface").get_child_count()
+		== road.get_center_points().size() - 1,
+		"road surface uses artifact-free convex strips"
+	)
+	check(
+		road.get_intersection_indices().size()
+		== int(road.get_layout_summary()["intersections"]),
+		"seeded variable-count intersections were generated"
+	)
+	check(
+		road.get_turnaround_indices().size() == int(road.get("turnaround_count")),
+		"seeded U-turn areas were generated"
+	)
+	check(
+		road.get_node("CrossStreets").get_child_count() > 0,
+		"intersections have traversable cross-street geometry"
+	)
+	check(
+		road.get_obstacle_regions().size() > 0
+		and road.get_node("ObstacleAreas").get_child_count() > 0,
+		"labeled obstacle regions were generated and rendered"
+	)
+
+	var junction_types: PackedStringArray = road.get_intersection_types()
+	check(
+		junction_types.has("t_junction")
+		and junction_types.has("four_way")
+		and junction_types.has("roundabout"),
+		"map guarantees T, four-way, and roundabout pieces"
+	)
+	check(
+		road.get_map_paths().size() > 4,
+		"map exposes arterial, side-road, dead-end, and roundabout paths"
+	)
+	var network: RefCounted = road.get_road_network()
+	check(
+		network.call("graph_is_connected"),
+		"road centerlines form one connected navigation graph"
+	)
+	check(
+		network.call("has_alternate_routes"),
+		"road graph contains real loops and alternate paths"
+	)
+	var graph_positions: Array = network.get("positions")
+	var graph_route: PackedVector2Array = network.call(
+		"find_path", graph_positions[0], graph_positions[graph_positions.size() - 1]
+	)
+	check(graph_route.size() > 2, "navigation graph finds a route across the map")
+
+	var probe_shape := CircleShape2D.new()
+	probe_shape.radius = 18.0
+	var probe := PhysicsShapeQueryParameters2D.new()
+	probe.shape = probe_shape
+	probe.collision_mask = 1
+	probe.collide_with_areas = false
+	var centerlines_clear := true
+	var blocked_centerline := ""
+	var map_paths: Array[PackedVector2Array] = road.get_map_paths()
+	for path_index in range(map_paths.size()):
+		for point_index in range(map_paths[path_index].size()):
+			var map_point: Vector2 = map_paths[path_index][point_index]
+			probe.transform = Transform2D(0.0, map_point)
+			var hits: Array[Dictionary] = main.get_world_2d().direct_space_state.intersect_shape(probe, 1)
+			if not hits.is_empty():
+				centerlines_clear = false
+				var hit_collider: Node = hits[0].get("collider")
+				blocked_centerline = "path %d point %d at %s (%s)" % [
+					path_index, point_index, map_point,
+					hit_collider.get_path() if hit_collider != null else "unknown"
+				]
+				break
+	check(
+		centerlines_clear,
+		"all mapped road centerlines are physically traversable" + (
+			"" if centerlines_clear else ": " + blocked_centerline
+		)
+	)
+
+	var minimap: Node = main.get_node("Minimap")
+	var minimap_view: Control = minimap.get_node("View")
+	var reveal_count := 0
+	var point_count := 0
+	for flags in minimap_view.get("discovered"):
+		point_count += flags.size()
+		for flag in flags:
+			reveal_count += int(flag)
+	check(
+		minimap_view.position == Vector2(16.0, 16.0),
+		"minimap is anchored in the top-left corner"
+	)
+	check(
+		reveal_count == point_count,
+		"minimap displays the complete generated road network"
+	)
+	var minimap_obstacles: Array = minimap_view.get("obstacles")
+	check(
+		minimap_obstacles.size() == road.get_obstacle_regions().size(),
+		"minimap includes every generated obstacle region"
+	)
+
+	var pedestrians: Array = pedestrian_manager.get("pedestrians")
+	var pedestrian_intersection_count := 0
+	for feature_type in road.get_intersection_types():
+		if feature_type != "roundabout":
+			pedestrian_intersection_count += 1
+	var expected_pedestrians: int = pedestrian_intersection_count \
+		* int(pedestrian_manager.get("pedestrians_per_intersection"))
+
+	check(
+		pedestrians.size() == expected_pedestrians,
+		"pedestrians generated at signalized crossings, not roundabouts"
+	)
+
+	var pedestrian_layers_ok: bool = true
+	var pedestrian_scenes_complete := true
+
+	for pedestrian in pedestrians:
+		if pedestrian.collision_layer != 4 or pedestrian.collision_mask != 0:
+			pedestrian_layers_ok = false
+		if pedestrian.get_node_or_null("Sprite2D") == null \
+		or pedestrian.get_node_or_null("CollisionShape2D") == null \
+		or pedestrian.get("traffic_light") == null:
+			pedestrian_scenes_complete = false
+
+	check(pedestrian_layers_ok, "pedestrians use dedicated collision layers")
+	check(
+		pedestrian_scenes_complete,
+		"each pedestrian has a sprite, hitbox, and linked signal"
+	)
+	var route: RoutePath = road.get_route()
+	var crosswalks: Node = pedestrian_manager.get_node("Crosswalks")
+	var crosswalks_inside_road := crosswalks.get_child_count() > 0
+	var maximum_crosswalk_span := 0.0
+	var maximum_crosswalk_alpha := 0.0
+	for stripe in crosswalks.get_children():
+		if not stripe is Line2D or stripe.get_point_count() != 2:
+			crosswalks_inside_road = false
+			continue
+		maximum_crosswalk_span = maxf(
+			maximum_crosswalk_span,
+			stripe.get_point_position(0).distance_to(stripe.get_point_position(1))
+		)
+		maximum_crosswalk_alpha = maxf(maximum_crosswalk_alpha, stripe.default_color.a)
+		var stripe_progress := float(stripe.get_meta("route_progress"))
+		var road_edges: Dictionary = road.get_road_edges_at(stripe_progress)
+		var left_edge: Vector2 = road_edges["left"]
+		var right_edge: Vector2 = road_edges["right"]
+		var road_span := left_edge.distance_to(right_edge)
+		var expected_inset: float = float(pedestrian_manager.get("crosswalk_edge_inset")) \
+			+ stripe.width * 0.5
+		var cross_road_axis: Vector2 = (right_edge - left_edge).normalized()
+		var expected_start: Vector2 = left_edge + cross_road_axis * expected_inset
+		var expected_end: Vector2 = right_edge - cross_road_axis * expected_inset
+		if road_span <= expected_inset * 2.0 \
+		or stripe.get_point_position(0).distance_to(expected_start) > 0.1 \
+		or stripe.get_point_position(1).distance_to(expected_end) > 0.1:
+			crosswalks_inside_road = false
+		for point_index in range(2):
+			var point: Vector2 = stripe.get_point_position(point_index)
+			var nearest := route.nearest(point)
+			var local_half_width := route.get_half_width_at(float(nearest["progress"]))
+			if float(nearest["distance"]) + stripe.width * 0.5 \
+			> local_half_width - float(pedestrian_manager.get("crosswalk_edge_inset")) + 2.0:
+				crosswalks_inside_road = false
+	var generated_widths: PackedFloat32Array = road.get("road_widths")
+	var maximum_generated_width := 0.0
+	for width in generated_widths:
+		maximum_generated_width = maxf(maximum_generated_width, width)
+	check(
+		crosswalks_inside_road
+		and maximum_crosswalk_span < maximum_generated_width
+		and maximum_crosswalk_alpha <= 0.5,
+		"crosswalk bars are small, translucent, and stay inside local road edges"
+	)
+
+	var pedestrian_waiting_zones_clear := true
+	var pedestrians_per_intersection := int(pedestrian_manager.get("pedestrians_per_intersection"))
+	var side_road_half_width := float(road.get("cross_street_width")) * 0.5
+	var required_side_clearance := float(pedestrian_manager.get("side_road_clearance"))
+	var intersection_indices: PackedInt32Array = road.get_intersection_indices()
+	for pedestrian_index in range(pedestrians.size()):
+		var intersection_number := int(pedestrians[pedestrian_index].get("intersection_index"))
+		var route_index := intersection_indices[intersection_number]
+		var progress := float(route.cumulative[route_index])
+		var endpoint: Vector2 = pedestrians[pedestrian_index].get("endpoint_a")
+		var endpoint_progress := float(route.nearest(endpoint)["progress"])
+		var along_offset := absf(endpoint_progress - progress)
+		if along_offset < side_road_half_width + required_side_clearance - 1.0:
+			pedestrian_waiting_zones_clear = false
+			break
+	check(
+		pedestrian_waiting_zones_clear,
+		"pedestrians wait beside side-road mouths instead of blocking them"
+	)
+
+	if not pedestrians.is_empty():
+		var pedestrian: CharacterBody2D = pedestrians[0]
+		var linked_light: Node = pedestrian.get("traffic_light")
+		linked_light.force_state(2)
+		var blocker := CharacterBody2D.new()
+		blocker.collision_layer = 2
+		blocker.collision_mask = 0
+		var blocker_shape := CollisionShape2D.new()
+		var blocker_rectangle := RectangleShape2D.new()
+		blocker_rectangle.size = Vector2(50.0, 80.0)
+		blocker_shape.shape = blocker_rectangle
+		blocker.add_child(blocker_shape)
+		main.add_child(blocker)
+		blocker.global_position = pedestrian.global_position
+		var pedestrian_start: Vector2 = pedestrian.global_position
+		await wait_physics(5)
+		check(
+			pedestrian.global_position.distance_to(pedestrian_start) > 1.0,
+			"pedestrian clears accidental vehicle overlap without deadlocking"
+		)
+		blocker.queue_free()
+		await wait_physics(120)
+		var crossing_nearest := route.nearest(pedestrian.global_position)
+		var crossing_half_width := route.get_half_width_at(
+			float(crossing_nearest["progress"])
+		)
+		check(
+			float(crossing_nearest["distance"]) <= crossing_half_width + 5.0,
+			"pedestrian crosses the curb boundary instead of freezing outside the road"
+		)
 
 	# --------------------------------------------------------
 	# CHANGE 1: variable NPC speeds
@@ -148,7 +460,103 @@ func run_all() -> void:
 
 	check(cars.size() == 8, "traffic spawned (%d cars)" % cars.size())
 
+	var ego_rectangle := (
+		ego.get_node("CollisionShape2D").shape as RectangleShape2D
+	)
+
+	check(
+		ego_rectangle != null
+		and ego_rectangle.size == Vector2(62.0, 122.0),
+		"ego hitbox fits inside its 70x131 sprite"
+	)
+
+	var variants: Dictionary = {}
+	var npc_hitboxes_fit: bool = true
+
+	for car in cars:
+		var sprite: Sprite2D = car.get_node("Sprite2D")
+		var shape := (
+			car.get_node("CollisionShape2D").shape as RectangleShape2D
+		)
+
+		variants[sprite.texture.resource_path] = true
+
+		if shape == null:
+			npc_hitboxes_fit = false
+			continue
+
+		if shape.size.x > sprite.texture.get_width():
+			npc_hitboxes_fit = false
+
+		if shape.size.y > sprite.texture.get_height():
+			npc_hitboxes_fit = false
+
+		if not is_equal_approx(
+			shape.size.y,
+			float(car.get("vehicle_length"))
+		):
+			npc_hitboxes_fit = false
+
+	check(npc_hitboxes_fit, "NPC hitboxes fit their visible sprites")
+	check(variants.size() == 3, "NPC traffic uses 3 deterministic variants")
+
+	if not cars.is_empty():
+		var sample_car: Node = cars[0]
+		var safe_gap: float = float(sample_car.get("safe_distance"))
+		var cruise: float = float(sample_car.get("cruise_speed"))
+		var stopped_target: float = sample_car.follow_speed(
+			safe_gap,
+			0.0
+		)
+		var open_target: float = sample_car.follow_speed(
+			1000.0,
+			0.0
+		)
+
+		check(stopped_target == 0.0, "NPC stops at its minimum bumper gap")
+		check(
+			is_equal_approx(open_target, cruise),
+			"NPC returns to cruise speed with an open road"
+		)
+
+		var lights: Array = light_manager.get("lights")
+
+		if not lights.is_empty():
+			var test_light: Node = lights[0]
+			test_light.force_state(2)
+			sample_car.set("travel_direction", 1.0)
+			sample_car.set(
+				"progress",
+				test_light.stop_progress_for(1.0) - 100.0
+			)
+			sample_car.set("speed", 100.0)
+			var red_limit: float = sample_car.traffic_light_speed_limit()
+
+			check(red_limit < cruise, "NPC brakes for a red traffic light")
+			test_light.force_state(0)
+			check(
+				is_equal_approx(
+					sample_car.traffic_light_speed_limit(),
+					cruise
+				),
+				"NPC proceeds through a green traffic light"
+			)
+
+			traffic.regenerate()
+			cars = traffic_cars()
+
 	var cruises: Array[float] = sorted_cruises(cars)
+	var used_lane_indices: Dictionary = {}
+	var spawns_avoid_intersections: bool = true
+
+	for car in cars:
+		used_lane_indices[int(car.get("lane_index"))] = true
+
+		if traffic.is_near_intersection(float(car.get("progress"))):
+			spawns_avoid_intersections = false
+
+	check(used_lane_indices.size() == 3, "NPCs use all three lane levels")
+	check(spawns_avoid_intersections, "NPCs do not spawn inside intersections")
 
 	var distinct: Dictionary = {}
 
@@ -198,6 +606,59 @@ func run_all() -> void:
 		cruises == cruises_again,
 		"same seed reproduces the same speed assignments"
 	)
+
+	# --------------------------------------------------------
+	# PRIORITY MERGE: ending outside lane yields to through lane
+	# --------------------------------------------------------
+	print("== Priority lane merge ==")
+	traffic.clear_traffic()
+	var active_route: RoutePath = road.get_route()
+	var merge_progress := -1.0
+	for sample in range(0, int(active_route.length) - 350, 25):
+		if active_route.get_lane_count_at(float(sample)) == 3 \
+		and active_route.get_lane_count_at(float(sample + 300)) < 3:
+			merge_progress = float(sample)
+			break
+
+	var traffic_scene: PackedScene = load("res://scenes/traffic_car.tscn")
+	var merging_car: Node = traffic_scene.instantiate()
+	var through_car: Node = traffic_scene.instantiate()
+	traffic.add_child(merging_car)
+	traffic.add_child(through_car)
+	merging_car.setup(active_route, 90, 2, 225.0, 1.0, merge_progress, 110.0)
+	through_car.setup(active_route, 91, 1, 135.0, 1.0, merge_progress - 80.0, 125.0)
+	merging_car.call("_update_lane_merge", 0.016)
+	check(merge_progress >= 0.0, "test located a generated outside-lane ending")
+	check(
+		bool(merging_car.get("merge_signal_active")),
+		"ending-lane car signals before merging"
+	)
+	check(
+		not bool(merging_car.get("lane_change_active")),
+		"ending-lane car waits when the continuing lane gap is unsafe"
+	)
+	check(
+		is_equal_approx(float(through_car.call("merge_speed_limit")), float(through_car.get("cruise_speed"))),
+		"continuing lane keeps priority and does not yield"
+	)
+
+	through_car.set("progress", maxf(merge_progress - 400.0, 0.0))
+	through_car.call("snap_to_route")
+	merging_car.call("_update_lane_merge", 0.016)
+	check(
+		bool(merging_car.get("lane_change_active")),
+		"ending-lane car accepts a safe gap"
+	)
+	merging_car.call("_update_lane_merge", float(merging_car.get("merge_duration")) + 0.1)
+	check(
+		int(merging_car.get("lane_index")) == 1,
+		"outside-lane merge completes into the adjacent lane"
+	)
+	traffic.remove_child(merging_car)
+	traffic.remove_child(through_car)
+	merging_car.queue_free()
+	through_car.queue_free()
+	traffic.regenerate()
 
 	# --------------------------------------------------------
 	# CHANGE 2: progressive acceleration
@@ -320,6 +781,71 @@ func run_all() -> void:
 		v_boost > 0.0,
 		"accelerate input produced motion (%.0f)" % v_boost
 	)
+
+	# S behaves like an automatic gearbox: brake while moving, then reverse.
+	reset_straight_drive()
+	Input.action_press("brake")
+	await wait_physics(20)
+	Input.action_release("brake")
+	check(ego.current_speed < 0.0, "brake input engages reverse after stopping")
+	check(
+		absf(ego.current_speed) <= float(ego.get("max_reverse_speed")),
+		"reverse speed obeys its lower configured limit"
+	)
+	check(ego.get_gear_label() == "R", "vehicle reports reverse gear")
+	reset_drive_state()
+	check(ego.get_gear_label() == "N", "stopped vehicle reports neutral gear")
+
+	# --------------------------------------------------------
+	# CONTROLLER-NEUTRAL COMMANDS + BICYCLE STEERING
+	# --------------------------------------------------------
+	print("== Vehicle command interface ==")
+
+	reset_straight_drive()
+	ego.set_control(1.0, 0.0, 0.0)
+	await wait_physics(12)
+
+	check(
+		ego.velocity.length() > 30.0,
+		"external throttle command drives the vehicle"
+	)
+
+	var rotation_before: float = ego.rotation
+	ego.set_control(1.0, 0.0, 1.0)
+	await wait_physics(15)
+
+	check(
+		absf(angle_difference(rotation_before, ego.rotation)) > 0.01,
+		"bicycle steering changes heading while moving"
+	)
+
+	ego.set_control(0.0, 1.0, 0.0)
+	var command_brake_start: float = ego.current_speed
+	await wait_physics(5)
+
+	check(
+		ego.current_speed < command_brake_start,
+		"external brake command reduces speed"
+	)
+
+	var state: Dictionary = environment_state.get_state()
+
+	check(
+		state.has("speed")
+		and state.has("heading_error")
+		and state.has("lane_center_error")
+		and state.has("road_curvature")
+		and state.has("sensor_distances"),
+		"environment exposes vehicle, lane, road, and sensor state"
+	)
+
+	check(
+		float(state.get("normalized_speed", -1.0)) >= 0.0
+		and float(state.get("normalized_speed", 2.0)) <= 1.0,
+		"environment speed is normalized"
+	)
+
+	reset_drive_state()
 
 	# --------------------------------------------------------
 	# CHANGE 3: speed HUD

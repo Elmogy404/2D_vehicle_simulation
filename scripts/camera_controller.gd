@@ -15,12 +15,17 @@ var target_zoom: float = 1.0
 
 func _ready() -> void:
 	target_zoom = zoom.x
+	position_smoothing_enabled = true
+	position_smoothing_speed = 7.0
+	ignore_rotation = true
+	process_callback = Camera2D.CAMERA2D_PROCESS_PHYSICS
+	make_current()
 
 
 func _process(delta: float) -> void:
 	zoom = zoom.lerp(
 		Vector2.ONE * target_zoom,
-		zoom_speed * delta
+		minf(zoom_speed * delta, 1.0)
 	)
 
 

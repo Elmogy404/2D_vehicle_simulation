@@ -1,0 +1,386 @@
+"""Train the Setup 2 PPO policy for long, graph-planned road routes."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from functools import partial
+from pathlib import Path
+
+from godot_gym_env import GodotRoadEnv
+
+
+def load_sb3_checkpoint(path: str, env: object) -> object:
+    """Load SB3 weights safely from a ZIP member on the local Windows/PyTorch runtime."""
+    import io
+    import zipfile
+    from unittest.mock import patch
+
+    import torch
+    from stable_baselines3 import PPO
+
+    original_torch_load = torch.load
+
+    def load_buffered_zip_member(
+        file_object: object,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        if isinstance(file_object, zipfile.ZipExtFile):
+            file_object = io.BytesIO(file_object.read())
+        return original_torch_load(file_object, *args, **kwargs)
+
+    with patch.object(torch, "load", side_effect=load_buffered_zip_member):
+        return PPO.load(path, env=env, device="cpu")
+
+
+def make_training_env(godot_executable: str | None) -> object:
+    from stable_baselines3.common.monitor import Monitor
+
+    return Monitor(GodotRoadEnv(godot_executable))
+
+
+def main() -> None:
+    # Keep torch/SB3 out of spawned worker imports to limit per-worker memory.
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, BaseCallback
+    from stable_baselines3.common.vec_env import SubprocVecEnv
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--steps", type=int, default=1_000_000)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--n-envs", type=int, default=1, help="Parallel Godot training worlds")
+    parser.add_argument("--checkpoint-every", type=int, default=10_240)
+    parser.add_argument(
+        "--run-name",
+        default="setup2_network_routes_ppo_v1",
+        help="Versioned basename for this run's model/checkpoints (without extension)",
+    )
+    parser.add_argument("--eval-every", type=int, default=50_000)
+    parser.add_argument(
+        "--eval-episodes",
+        type=int,
+        default=16,
+        help="Mixed-tier deterministic episodes per checkpoint evaluation",
+    )
+    parser.add_argument("--eval-seed", type=int, default=10_000)
+    parser.add_argument("--success-threshold", type=float, default=0.9)
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=3,
+        help=(
+            "Stop after this many consecutive evaluations meet the overall and "
+            "longest-route success gates; set 0 to disable"
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        help="Resume a checkpoint from the same reward-version/run name up to --steps total",
+    )
+    parser.add_argument("--godot", help="Godot 4 executable; defaults to GODOT_BIN/PATH")
+    arguments = parser.parse_args()
+    if arguments.steps < 1:
+        parser.error("--steps must be at least 1")
+    if arguments.n_envs < 1:
+        parser.error("--n-envs must be at least 1")
+    if arguments.checkpoint_every < 1:
+        parser.error("--checkpoint-every must be at least 1")
+    if arguments.eval_every < 0:
+        parser.error("--eval-every must be zero (disabled) or positive")
+    if arguments.eval_episodes < 1:
+        parser.error("--eval-episodes must be at least 1")
+    if arguments.early_stop_patience < 0:
+        parser.error("--early-stop-patience must be zero (disabled) or positive")
+    if arguments.eval_every == 0 and arguments.early_stop_patience > 0:
+        parser.error("--eval-every 0 requires --early-stop-patience 0")
+    if not 0.0 <= arguments.success_threshold <= 1.0:
+        parser.error("--success-threshold must be between 0 and 1")
+    if Path(arguments.run_name).name != arguments.run_name or arguments.run_name.endswith(".zip"):
+        parser.error("--run-name must be a basename without a .zip extension")
+    if arguments.resume and arguments.run_name not in Path(arguments.resume).name:
+        parser.error(
+            "--resume must use a checkpoint from the same run/reward version; "
+            "start fresh after changing the reward"
+        )
+
+    model_dir = Path(__file__).resolve().parent / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = model_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir = Path(__file__).resolve().parent / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    if arguments.n_envs == 1:
+        env = make_training_env(arguments.godot)
+        rollout_steps = 1024
+    else:
+        env = SubprocVecEnv(
+            [partial(make_training_env, arguments.godot) for _ in range(arguments.n_envs)],
+            start_method="spawn",
+        )
+        # Keep each PPO update near a 1,024-transition batch as workers increase.
+        rollout_steps = max(128, 1024 // arguments.n_envs)
+    evaluation_env: object | None = None
+    try:
+        if arguments.resume:
+            model = load_sb3_checkpoint(arguments.resume, env)
+            remaining_steps = arguments.steps - model.num_timesteps
+            if remaining_steps <= 0:
+                parser.error(
+                    "resume checkpoint already has %d steps; --steps must be larger"
+                    % model.num_timesteps
+                )
+            print(
+                "Resuming at %d/%d timesteps" % (model.num_timesteps, arguments.steps),
+                flush=True,
+            )
+        else:
+            model = PPO(
+                "MlpPolicy",
+                env,
+                verbose=1,
+                seed=arguments.seed,
+                n_steps=rollout_steps,
+                batch_size=64,
+                learning_rate=3e-4,
+                gamma=0.995,
+                gae_lambda=0.95,
+                ent_coef=0.01,
+                device="cpu",
+            )
+            remaining_steps = arguments.steps
+
+        callbacks = [
+            CheckpointCallback(
+                save_freq=max(1, arguments.checkpoint_every // arguments.n_envs),
+                save_path=str(checkpoint_dir),
+                name_prefix=arguments.run_name,
+                verbose=1,
+            )
+        ]
+
+        if arguments.eval_every > 0:
+            evaluation_env = make_training_env(arguments.godot)
+
+            class SuccessRateEvalCallback(BaseCallback):
+                """Compare checkpoints by a fixed, mixed-difficulty success suite."""
+
+                def __init__(self) -> None:
+                    super().__init__(verbose=0)
+                    self.next_eval_timestep = arguments.eval_every
+                    self.best_score: tuple[float, float, float, float, float, float] | None = None
+                    self.early_stop_streak = 0
+                    self.can_early_stop = arguments.eval_episodes >= 8
+                    self.best_path = model_dir / f"{arguments.run_name}_best"
+                    self.csv_path = runs_dir / f"{arguments.run_name}_success_eval.csv"
+                    if not self.csv_path.exists():
+                        with self.csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+                            csv.writer(csv_file).writerow(
+                                [
+                                    "timesteps",
+                                    "episodes",
+                                    "stage_mix",
+                                    "success_rate",
+                                    "crash_rate",
+                                    "off_road_rate",
+                                    "mean_steps",
+                                    "mean_route_turns",
+                                    "longest_stage_success_rate",
+                                    "longest_stage_turn_coverage",
+                                    "mean_return",
+                                    "best_checkpoint_saved",
+                                    "90_percent_gate_met",
+                                    "early_stop_streak",
+                                ]
+                            )
+
+                def _on_training_start(self) -> None:
+                    self.next_eval_timestep = (
+                        self.num_timesteps // arguments.eval_every + 1
+                    ) * arguments.eval_every
+                    if arguments.early_stop_patience > 0 and not self.can_early_stop:
+                        print(
+                            "Early stopping disabled for this run: --eval-episodes "
+                            "must cover all 8 route-distance stages.",
+                            flush=True,
+                        )
+
+                def _on_step(self) -> bool:
+                    if self.num_timesteps < self.next_eval_timestep:
+                        return True
+                    self.next_eval_timestep += arguments.eval_every
+
+                    outcomes: list[dict[str, float | bool | int]] = []
+                    for episode in range(arguments.eval_episodes):
+                        stage = episode % 8
+                        observation, _reset_info = evaluation_env.reset(
+                            seed=arguments.eval_seed + episode,
+                            options={
+                                "curriculum": False,
+                                "curriculum_stage": stage,
+                            },
+                        )
+                        episode_return = 0.0
+                        steps = 0
+                        final_info: dict[str, object] = {}
+                        while True:
+                            action, _state = self.model.predict(
+                                observation, deterministic=True
+                            )
+                            (
+                                observation,
+                                reward,
+                                terminated,
+                                truncated,
+                                final_info,
+                            ) = evaluation_env.step(action)
+                            episode_return += float(reward)
+                            steps += 1
+                            if terminated or truncated:
+                                break
+                        outcomes.append(
+                            {
+                                "stage": stage,
+                                "success": bool(final_info.get("success", False)),
+                                "crashed": bool(final_info.get("crashed", False)),
+                                "off_road": bool(final_info.get("off_road", False)),
+                                "steps": float(steps),
+                                "route_turns": float(final_info.get("route_turns", 0)),
+                                "turn_requirement_met": bool(
+                                    final_info.get("turn_requirement_met", False)
+                                ),
+                                "return": episode_return,
+                            }
+                        )
+
+                    count = float(len(outcomes))
+                    success_rate = sum(
+                        bool(item["success"]) for item in outcomes
+                    ) / count
+                    crash_rate = sum(
+                        bool(item["crashed"]) for item in outcomes
+                    ) / count
+                    off_road_rate = sum(
+                        bool(item["off_road"]) for item in outcomes
+                    ) / count
+                    mean_steps = sum(float(item["steps"]) for item in outcomes) / count
+                    mean_route_turns = sum(
+                        float(item["route_turns"]) for item in outcomes
+                    ) / count
+                    mean_return = sum(float(item["return"]) for item in outcomes) / count
+                    longest_stage_outcomes = [
+                        item for item in outcomes if int(item["stage"]) == 7
+                    ]
+                    longest_stage_success_rate = (
+                        sum(bool(item["success"]) for item in longest_stage_outcomes)
+                        / float(len(longest_stage_outcomes))
+                        if longest_stage_outcomes
+                        else 0.0
+                    )
+                    longest_stage_turn_coverage = (
+                        sum(bool(item.get("turn_requirement_met", False)) for item in longest_stage_outcomes)
+                        / float(len(longest_stage_outcomes))
+                        if longest_stage_outcomes
+                        else 0.0
+                    )
+                    stage_mix = ";".join(
+                        str(int(item["stage"])) for item in outcomes
+                    )
+                    score = (
+                        longest_stage_success_rate,
+                        longest_stage_turn_coverage,
+                        success_rate,
+                        -crash_rate,
+                        -off_road_rate,
+                        mean_return,
+                    )
+                    save_best = self.best_score is None or score > self.best_score
+                    if save_best:
+                        self.best_score = score
+                        self.model.save(self.best_path)
+
+                    overall_gate_met = success_rate >= arguments.success_threshold
+                    longest_route_gate_met = (
+                        longest_stage_success_rate >= arguments.success_threshold
+                        and longest_stage_turn_coverage >= arguments.success_threshold
+                    )
+                    gate_met = overall_gate_met and longest_route_gate_met
+                    if arguments.early_stop_patience > 0 and self.can_early_stop:
+                        self.early_stop_streak = self.early_stop_streak + 1 if gate_met else 0
+                    print(
+                        "SUCCESS EVAL steps=%d episodes=%d stages=%s success=%.1f%% "
+                        "crash=%.1f%% off_road=%.1f%% mean_steps=%.1f turns=%.2f "
+                        "longest_stage=%.1f%% turn_coverage=%.1f%% mean_return=%.2f best_saved=%s "
+                        "gate_%d%%=%s stop_streak=%d/%d"
+                        % (
+                            self.num_timesteps,
+                            len(outcomes),
+                            stage_mix,
+                            success_rate * 100.0,
+                            crash_rate * 100.0,
+                            off_road_rate * 100.0,
+                            mean_steps,
+                            mean_route_turns,
+                            longest_stage_success_rate * 100.0,
+                            longest_stage_turn_coverage * 100.0,
+                            mean_return,
+                            save_best,
+                            int(arguments.success_threshold * 100),
+                            gate_met,
+                            self.early_stop_streak,
+                            arguments.early_stop_patience,
+                        ),
+                        flush=True,
+                    )
+                    with self.csv_path.open("a", newline="", encoding="utf-8") as csv_file:
+                        csv.writer(csv_file).writerow(
+                            [
+                                self.num_timesteps,
+                                len(outcomes),
+                                stage_mix,
+                                success_rate,
+                                crash_rate,
+                                off_road_rate,
+                                mean_steps,
+                                mean_route_turns,
+                                longest_stage_success_rate,
+                                longest_stage_turn_coverage,
+                                mean_return,
+                                save_best,
+                                gate_met,
+                                self.early_stop_streak,
+                            ]
+                        )
+                    if (
+                        arguments.early_stop_patience > 0
+                        and self.can_early_stop
+                        and self.early_stop_streak >= arguments.early_stop_patience
+                    ):
+                        print(
+                            "EARLY STOP: success gates held for %d consecutive evaluations at %d timesteps."
+                            % (self.early_stop_streak, self.num_timesteps),
+                            flush=True,
+                        )
+                        return False
+                    return True
+
+            callbacks.append(SuccessRateEvalCallback())
+
+        callback = CallbackList(callbacks)
+        model.learn(
+            total_timesteps=remaining_steps,
+            callback=callback,
+            progress_bar=False,
+            reset_num_timesteps=not bool(arguments.resume),
+        )
+        output = model_dir / arguments.run_name
+        model.save(output)
+        print(f"Saved PPO policy to {output}.zip")
+    finally:
+        if evaluation_env is not None:
+            evaluation_env.close()
+        env.close()
+
+
+if __name__ == "__main__":
+    main()

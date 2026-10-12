@@ -40,6 +40,10 @@ func _input(event: InputEvent) -> void:
 		if key and key.pressed and not key.echo:
 			if key.keycode == KEY_R or key.physical_keycode == KEY_R:
 				restart()
+				get_viewport().set_input_as_handled()
+			elif key.keycode == KEY_I or key.physical_keycode == KEY_I:
+				get_parent().toggle_ai_mode()
+				get_viewport().set_input_as_handled()
 
 
 # ============================================================

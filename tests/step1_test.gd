@@ -232,6 +232,7 @@ func run_all() -> void:
 	await wait_frames(300)
 
 	var max_lateral: float = 0.0
+	var max_road_overflow: float = -INF
 	var moved_count: int = 0
 
 	for car in cars:
@@ -246,6 +247,11 @@ func run_all() -> void:
 			max_lateral,
 			float(car_near["distance"])
 		)
+		max_road_overflow = maxf(
+			max_road_overflow,
+			float(car_near["distance"])
+			- route.get_half_width_at(float(car_near["progress"]))
+		)
 
 		if absf(
 			float(car.get("progress"))
@@ -254,9 +260,9 @@ func run_all() -> void:
 			moved_count += 1
 
 	check(
-		max_lateral <= road_width * 0.5 + 5.0,
-		"no car left the drivable area (max lateral %.0f)"
-		% max_lateral
+		max_road_overflow <= 5.0,
+		"no car left the variable-width drivable area (overflow %.0f)"
+		% max_road_overflow
 	)
 
 	check(
@@ -386,7 +392,9 @@ func run_all() -> void:
 			car.global_position
 		)
 
-		if float(car_near["distance"]) > road_width * 0.5 + 5.0:
+		if float(car_near["distance"]) > route.get_half_width_at(
+			float(car_near["progress"])
+		) + 5.0:
 			spawn_on_road = false
 
 	check(route_shared, "every car follows the current route")

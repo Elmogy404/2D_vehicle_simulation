@@ -1,32 +1,650 @@
 extends Node2D
 
+const POLICY_SERVER_PORT := 8766
+const POLICY_SERVER_START_TIMEOUT_MSEC := 20000
+const POLICY_ACTION_REPEAT := 4
+const MAX_GOAL_DISTANCE := 6000.0
+const MIN_GOAL_DISTANCE := 250.0
+const DEFAULT_GOAL_DISTANCE := 4200.0
+const GOAL_ROUTE_START_CLEARANCE := 80.0
+const GOAL_ROUTE_EXTRA_MINIMUM := 160.0
+const GOAL_ROUTE_EXTRA_MAXIMUM := 240.0
+const GOAL_RADIUS := 85.0
+const ROAD_PREVIEW_DISTANCES := [60.0, 120.0, 240.0, 400.0]
+const OBSERVATION_SIZE := 31
+const DEFAULT_AI_CHECKPOINT := 1
+const POLICY_MODEL_PATHS := {
+	1: "res://ai/models/setup2_network_routes_ppo_v1_best.zip",
+	2: "res://ai/models/checkpoints/setup2_network_routes_ppo_v1_276480_steps.zip"
+}
+const POLICY_SERVER_PATH := "res://ai/live_policy_server.py"
 
-@onready var road_generator = $RoadGenerator
-@onready var ego_vehicle = $EgoVehicle
-@onready var traffic_manager = $TrafficManager
+@onready var road_generator: Node = $RoadGenerator
+@onready var ego_vehicle: CharacterBody2D = $EgoVehicle
+@onready var traffic_manager: Node = $TrafficManager
+@onready var traffic_light_manager: Node = $TrafficLightManager
+@onready var pedestrian_manager: Node = $PedestrianManager
+@onready var debug_camera: Camera2D = $DebugCamera
+@onready var minimap_view: Control = $Minimap/View
+@onready var ai_mode_hud: CanvasLayer = $AiModeHud
+@onready var game_over: CanvasLayer = $GameOver
+
+var goal_marker: Node2D
+var ai_mode_active := false
+var ai_status := ""
+var ai_goal_position := Vector2.ZERO
+var ai_goal_progress := 0.0
+var ai_last_progress := 0.0
+var ai_target_distance := DEFAULT_GOAL_DISTANCE
+var selected_ai_checkpoint := DEFAULT_AI_CHECKPOINT
+var ai_route_turns := 0
+var ai_turn_requirement_met := false
+var ai_goal_reached := false
+var ai_failed := false
+var ai_route: RoutePath
+var ai_rng := RandomNumberGenerator.new()
+var ai_action := Vector2.ZERO
+var ai_action_clock := 0
+var ai_request_in_flight := false
+var ai_request_id := 0
+var ai_peer: StreamPeerTCP
+var ai_peer_buffer := PackedByteArray()
+var ai_process_id := -1
+var ai_started_at_msec := 0
+var ai_next_connect_msec := 0
+var ai_connect_pending := false
+var ai_ever_connected := false
+var ai_python_executable := ""
+var saved_road_hotkeys := true
+var saved_manual_position := Vector2.ZERO
+var saved_manual_rotation := 0.0
+var saved_manual_speed := 0.0
+var saved_manual_steering := 0.0
+var saved_manual_crashed := false
+var saved_debug_camera_mode := false
 
 
 func _ready() -> void:
+	goal_marker = Node2D.new()
+	goal_marker.name = "AiGoalMarker"
+	goal_marker.set_script(load("res://scripts/goal_marker.gd"))
+	goal_marker.z_index = 20
+	add_child(goal_marker)
+	ai_mode_hud.call("set_target_distance", ai_target_distance)
+	ai_mode_hud.call("set_checkpoint_label", _selected_checkpoint_label())
+	ai_mode_hud.connect("target_distance_changed", _on_ai_target_distance_changed)
 	place_ego()
+	road_generator.road_regenerated.connect(_on_road_regenerated)
+	_update_mode_hud()
 
-	# Rebuilds the ego spawn pose whenever the road changes
-	# (traffic follows automatically via its own connection).
-	road_generator.road_regenerated.connect(place_ego)
+
+func _exit_tree() -> void:
+	_shutdown_policy_service()
+
+
+func _process(_delta: float) -> void:
+	if not ai_mode_active:
+		return
+	_poll_policy_server()
+	_update_mode_hud()
+
+
+func _physics_process(_delta: float) -> void:
+	if not ai_mode_active:
+		return
+	if ai_failed:
+		_stop_vehicle_for_ai_result()
+		return
+	if bool(ego_vehicle.get("has_crashed")):
+		ai_failed = true
+		ai_status = "The AI crashed. Press R to retry or I to return to manual driving."
+		ai_mode_hud.call("set_mode", true, ai_status, _goal_distance_remaining())
+		return
+	if ai_goal_reached:
+		_stop_vehicle_for_ai_result()
+		return
+	if ai_route == null or not ai_route.is_valid():
+		return
+
+	var route_state := _get_ai_route_state()
+	var safe_half_width: float = maxf(
+		float(route_state["half_width"]) - float(ego_vehicle.get("vehicle_width")) * 0.5,
+		1.0
+	)
+	if absf(float(route_state["lateral_offset"])) > safe_half_width:
+		ai_failed = true
+		ai_status = "The AI left the drivable road. Press R to retry or I to return."
+		_stop_vehicle_for_ai_result()
+		return
+
+	if ego_vehicle.global_position.distance_to(ai_goal_position) <= GOAL_RADIUS:
+		ai_goal_reached = true
+		ai_status = "Destination reached! Press R for another goal or I to return."
+		_stop_vehicle_for_ai_result()
+		return
+
+	ai_last_progress = float(route_state["progress"])
+	_apply_ai_action()
+	ai_action_clock += 1
+	if ai_action_clock >= POLICY_ACTION_REPEAT:
+		ai_action_clock = 0
+		_send_policy_observation()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	var key := event as InputEventKey
+	if key == null or not key.pressed or key.echo:
+		return
+	if key.keycode == KEY_1 or key.physical_keycode == KEY_1:
+		select_ai_checkpoint(1)
+		get_viewport().set_input_as_handled()
+	elif key.keycode == KEY_2 or key.physical_keycode == KEY_2:
+		select_ai_checkpoint(2)
+		get_viewport().set_input_as_handled()
+	elif key.keycode == KEY_I or key.physical_keycode == KEY_I:
+		toggle_ai_mode()
+		get_viewport().set_input_as_handled()
+	elif ai_mode_active and (key.keycode == KEY_R or key.physical_keycode == KEY_R):
+		restart_simulation()
+		get_viewport().set_input_as_handled()
+
+
+func toggle_ai_mode() -> void:
+	if ai_mode_active:
+		_leave_ai_mode()
+	else:
+		_enter_ai_mode()
+
+
+func select_ai_checkpoint(checkpoint_id: int) -> void:
+	if not POLICY_MODEL_PATHS.has(checkpoint_id):
+		return
+	var checkpoint_changed := selected_ai_checkpoint != checkpoint_id
+	selected_ai_checkpoint = checkpoint_id
+	ai_mode_hud.call("set_checkpoint_label", _selected_checkpoint_label())
+	if not ai_mode_active:
+		_enter_ai_mode()
+		return
+	if not checkpoint_changed:
+		restart_simulation()
+		return
+
+	if get_tree().paused:
+		get_tree().paused = false
+	_shutdown_policy_service()
+	ai_failed = false
+	ai_goal_reached = false
+	ai_action = Vector2.ZERO
+	ai_action_clock = 0
+	ai_request_id = 0
+	ai_request_in_flight = false
+	ai_peer_buffer.clear()
+	_begin_ai_goal()
+	if ai_failed:
+		_update_mode_hud()
+		return
+	ai_status = "Loading %s PPO policy..." % _selected_checkpoint_label()
+	_update_mode_hud()
+	_start_policy_service()
+
+
+func _enter_ai_mode() -> void:
+	var model_path := _selected_policy_model_path()
+	if not FileAccess.file_exists(model_path):
+		ai_status = "AI model not found: %s" % model_path
+		_update_mode_hud()
+		return
+	if not FileAccess.file_exists(POLICY_SERVER_PATH):
+		ai_status = "AI policy service is missing."
+		_update_mode_hud()
+		return
+
+	_save_manual_state()
+	saved_debug_camera_mode = bool(debug_camera.get("debug_mode"))
+	if saved_debug_camera_mode:
+		debug_camera.call("toggle_camera")
+	ai_mode_active = true
+	ai_goal_reached = false
+	ai_failed = false
+	ai_action = Vector2.ZERO
+	ai_action_clock = 0
+	ai_request_in_flight = false
+	ai_request_id = 0
+	ai_peer_buffer.clear()
+	saved_road_hotkeys = bool(road_generator.get("enable_hotkeys"))
+	road_generator.set("enable_hotkeys", false)
+	_set_dynamic_actors_enabled(false)
+	if get_tree().paused:
+		get_tree().paused = false
+	game_over.visible = false
+	_begin_ai_goal()
+	if ai_failed:
+		_update_mode_hud()
+		return
+	ai_status = "Loading PPO policy..."
+	_update_mode_hud()
+	_start_policy_service()
+
+
+func _leave_ai_mode() -> void:
+	ai_mode_active = false
+	_shutdown_policy_service()
+	road_generator.set("enable_hotkeys", saved_road_hotkeys)
+	if get_tree().paused:
+		get_tree().paused = false
+	game_over.visible = false
+	minimap_view.call("set_goal_position", Vector2.ZERO, false)
+	minimap_view.call("set_planned_route", [], false)
+	goal_marker.call("set_goal", Vector2.ZERO, false)
+	queue_redraw()
+
+	ego_vehicle.reset_vehicle()
+	if saved_manual_crashed:
+		place_ego()
+	else:
+		ego_vehicle.global_position = saved_manual_position
+		ego_vehicle.global_rotation = saved_manual_rotation
+		ego_vehicle.set("current_speed", saved_manual_speed)
+		ego_vehicle.set("steering_input", saved_manual_steering)
+		ego_vehicle.use_default_controller()
+	_set_dynamic_actors_enabled(true)
+	if saved_debug_camera_mode:
+		debug_camera.call("toggle_camera")
+	ai_route = null
+	ai_status = "Manual driving restored. Press I to watch the Setup 2 checkpoint."
+	_update_mode_hud()
+
+
+func _save_manual_state() -> void:
+	saved_manual_position = ego_vehicle.global_position
+	saved_manual_rotation = ego_vehicle.global_rotation
+	saved_manual_speed = float(ego_vehicle.get("current_speed"))
+	saved_manual_steering = float(ego_vehicle.get("steering_input"))
+	saved_manual_crashed = bool(ego_vehicle.get("has_crashed"))
+
+
+func _set_dynamic_actors_enabled(enabled: bool) -> void:
+	if enabled:
+		traffic_manager.call("set_traffic_enabled", true)
+		traffic_light_manager.call("set_lights_enabled", true)
+		pedestrian_manager.call("set_pedestrians_enabled", true)
+	else:
+		traffic_manager.call("set_traffic_enabled", false)
+		traffic_light_manager.call("set_lights_enabled", false)
+		pedestrian_manager.call("set_pedestrians_enabled", false)
+
+
+func _begin_ai_goal() -> void:
+	var network: Object = road_generator.call("get_road_network")
+	if network == null:
+		ai_status = "The generated road network is unavailable. Press I to return."
+		ai_failed = true
+		return
+
+	ai_rng.randomize()
+	var requested_turns := _minimum_turns_for_target_distance(ai_target_distance)
+	var route_data: Dictionary = network.call(
+		"choose_random_route",
+		ai_target_distance + GOAL_ROUTE_EXTRA_MINIMUM,
+		ai_target_distance + GOAL_ROUTE_EXTRA_MAXIMUM,
+		requested_turns,
+		ai_rng
+	)
+	if route_data.is_empty():
+		ai_status = "No connected route fits %d units. Lower the target and press R." % roundi(ai_target_distance)
+		ai_failed = true
+		return
+
+	ai_route = RoutePath.new()
+	ai_route.build(
+		route_data["points"],
+		route_data["half_widths"],
+		PackedFloat32Array(),
+		float(road_generator.get("lane_width"))
+	)
+	if not ai_route.is_valid():
+		ai_status = "The road planner returned an invalid route. Press R to retry."
+		ai_failed = true
+		return
+	ai_route_turns = int(route_data.get("turns", 0))
+	ai_turn_requirement_met = bool(route_data.get("turn_requirement_met", false))
+	var start_progress := minf(GOAL_ROUTE_START_CLEARANCE, ai_route.length * 0.1)
+	var available_goal_distance := ai_route.length - start_progress - GOAL_ROUTE_START_CLEARANCE * 0.5
+	if available_goal_distance < ai_target_distance:
+		ai_status = "The selected route is too short for %d units. Press R to retry." % roundi(ai_target_distance)
+		ai_failed = true
+		return
+	ai_goal_progress = start_progress + ai_target_distance
+	ai_goal_position = ai_route.get_position_at(
+		ai_goal_progress,
+		_ai_lane_center_offset_at(ai_goal_progress)
+	)
+	ai_last_progress = start_progress
+	ai_goal_reached = false
+	ai_failed = false
+	ai_request_id += 1
+	ai_request_in_flight = false
+	ai_action = Vector2.ZERO
+	ego_vehicle.reset_vehicle()
+	ego_vehicle.global_position = ai_route.get_position_at(
+		start_progress,
+		_ai_lane_center_offset_at(start_progress)
+	)
+	ego_vehicle.global_rotation = ai_route.get_rotation_at(start_progress)
+	ego_vehicle.set_control(0.0, 0.0, 0.0)
+	ego_vehicle.get_node("SensorRig").call("update_sensors")
+	minimap_view.call("set_goal_position", ai_goal_position, true)
+	minimap_view.call("set_planned_route", ai_route.points, true)
+	goal_marker.call("set_goal", ai_goal_position, true)
+	ai_status = _ai_driving_status() if _policy_is_connected() else "Loading PPO policy..."
+	queue_redraw()
+	_update_mode_hud()
+
+
+func _start_policy_service() -> void:
+	ai_python_executable = OS.get_environment("AI_PYTHON")
+	if ai_python_executable.is_empty():
+		var project_venv_python := ProjectSettings.globalize_path("res://.venv-ai/Scripts/python.exe")
+		var ai_venv_python := ProjectSettings.globalize_path("res://ai/.venv/Scripts/python.exe")
+		if FileAccess.file_exists(project_venv_python):
+			ai_python_executable = project_venv_python
+		elif FileAccess.file_exists(ai_venv_python):
+			ai_python_executable = ai_venv_python
+		else:
+			ai_python_executable = "python"
+	var model_path := ProjectSettings.globalize_path(_selected_policy_model_path())
+	var server_path := ProjectSettings.globalize_path(POLICY_SERVER_PATH)
+	var process_args := PackedStringArray([
+		"-u",
+		server_path,
+		"--model",
+		model_path,
+		"--port",
+		str(POLICY_SERVER_PORT)
+	])
+	ai_process_id = OS.create_process(ai_python_executable, process_args, false)
+	if ai_process_id <= 0:
+		ai_process_id = -1
+		ai_status = "Could not start Python. Set AI_PYTHON or add Python to PATH."
+		ai_failed = true
+		ai_started_at_msec = Time.get_ticks_msec()
+		return
+	ai_peer_buffer.clear()
+	ai_peer = null
+	ai_connect_pending = false
+	ai_ever_connected = false
+	ai_started_at_msec = Time.get_ticks_msec()
+	ai_next_connect_msec = 0
+	_try_connect_policy_server()
+
+
+func _try_connect_policy_server() -> void:
+	if not ai_mode_active or ai_connect_pending:
+		return
+	ai_peer = StreamPeerTCP.new()
+	var connect_error: int = ai_peer.connect_to_host("127.0.0.1", POLICY_SERVER_PORT)
+	if connect_error == OK:
+		ai_connect_pending = true
+	else:
+		ai_peer = null
+		ai_next_connect_msec = Time.get_ticks_msec() + 250
+
+
+func _poll_policy_server() -> void:
+	if ai_failed:
+		return
+	var now := Time.get_ticks_msec()
+	if ai_peer != null:
+		ai_peer.poll()
+		if ai_peer.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+			ai_connect_pending = false
+			ai_ever_connected = true
+			if ai_status.begins_with("Loading") or ai_status.begins_with("Connecting"):
+				ai_status = _ai_driving_status()
+			var available := ai_peer.get_available_bytes()
+			if available > 0:
+				var received: Array = ai_peer.get_data(available)
+				if received[0] == OK:
+					ai_peer_buffer.append_array(received[1])
+					_extract_policy_responses()
+		elif ai_peer.get_status() == StreamPeerTCP.STATUS_NONE \
+		or ai_peer.get_status() == StreamPeerTCP.STATUS_ERROR:
+			if ai_ever_connected:
+				ai_failed = true
+				ai_status = "Lost the PPO connection. Press I to return to manual driving."
+			elif ai_connect_pending:
+				ai_connect_pending = false
+				ai_peer = null
+				ai_next_connect_msec = now + 250
+
+	if ai_peer == null and now >= ai_next_connect_msec:
+		if now - ai_started_at_msec > POLICY_SERVER_START_TIMEOUT_MSEC:
+			ai_failed = true
+			ai_status = "Python policy did not start. Check ai/runs/live_policy.log, then press I to return."
+			return
+		ai_status = "Connecting to the PPO policy..."
+		_try_connect_policy_server()
+
+
+func _extract_policy_responses() -> void:
+	var newline_index := ai_peer_buffer.find(10)
+	while newline_index >= 0:
+		var line := ai_peer_buffer.slice(0, newline_index).get_string_from_utf8()
+		ai_peer_buffer = ai_peer_buffer.slice(newline_index + 1)
+		if not line.is_empty():
+			var parsed: Variant = JSON.parse_string(line)
+			if parsed is Dictionary:
+				var response: Dictionary = parsed
+				var response_id := int(response.get("request_id", -1))
+				if response_id == ai_request_id:
+					var action: Variant = response.get("action", [])
+					if action is Array and action.size() == 2:
+						ai_action = Vector2(
+							clampf(float(action[0]), -1.0, 1.0),
+							clampf(float(action[1]), -1.0, 1.0)
+						)
+						ai_request_in_flight = false
+					elif response.has("error"):
+						ai_request_in_flight = false
+						ai_status = "Policy error: %s" % String(response["error"])
+		newline_index = ai_peer_buffer.find(10)
+
+
+func _send_policy_observation() -> void:
+	if ai_request_in_flight or ai_peer == null \
+	or ai_peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+		return
+	var observation := _get_ai_observation()
+	if observation.size() != OBSERVATION_SIZE:
+		ai_failed = true
+		ai_status = "AI observation size mismatch; press I to return."
+		return
+	ai_request_id += 1
+	var message := {
+		"type": "predict",
+		"request_id": ai_request_id,
+		"observation": observation
+	}
+	var write_error := ai_peer.put_data((JSON.stringify(message) + "\n").to_utf8_buffer())
+	if write_error == OK:
+		ai_request_in_flight = true
+	else:
+		ai_status = "Lost connection to the PPO policy. Press I to return."
+		ai_failed = true
+
+
+func _apply_ai_action() -> void:
+	if ai_peer == null or ai_peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+		ego_vehicle.set_control(0.0, 0.0, 0.0)
+		return
+	var throttle := maxf(ai_action.y, 0.0)
+	var brake := maxf(-ai_action.y, 0.0)
+	if float(ego_vehicle.get("current_speed")) <= float(ego_vehicle.get("direction_change_threshold")):
+		brake = 0.0
+	ego_vehicle.set_control(throttle, brake, ai_action.x)
+
+
+func _stop_vehicle_for_ai_result() -> void:
+	var current_speed := float(ego_vehicle.get("current_speed"))
+	if current_speed > float(ego_vehicle.get("direction_change_threshold")):
+		ego_vehicle.set_control(0.0, 1.0, 0.0)
+	else:
+		ego_vehicle.set_control(0.0, 0.0, 0.0)
+
+
+func _get_ai_route_state() -> Dictionary:
+	var nearest: Dictionary = ai_route.nearest(
+		ego_vehicle.global_position,
+		ai_last_progress,
+		1800.0
+	)
+	var progress := float(nearest["progress"])
+	var center: Vector2 = ai_route.get_position_at(progress)
+	var direction: Vector2 = ai_route.get_direction_at(progress)
+	var normal: Vector2 = ai_route.get_normal_at(progress)
+	var lateral_offset := (ego_vehicle.global_position - center).dot(normal)
+	var target_lane_offset := _ai_lane_center_offset_at(progress)
+	return {
+		"progress": progress,
+		"lateral_offset": lateral_offset,
+		"lane_error": lateral_offset - target_lane_offset,
+		"heading_error": direction.angle_to(Vector2.UP.rotated(ego_vehicle.global_rotation)),
+		"half_width": ai_route.get_half_width_at(progress)
+	}
+
+
+func _get_ai_observation() -> Array[float]:
+	var result: Array[float] = []
+	if ai_route == null or not ai_route.is_valid():
+		result.resize(OBSERVATION_SIZE)
+		result.fill(0.0)
+		return result
+	var state := _get_ai_route_state()
+	var sensors: Node = ego_vehicle.get_node("SensorRig")
+	sensors.call("update_sensors")
+	for distance in sensors.call("get_observation"):
+		result.append(clampf(float(distance), 0.0, 1.0))
+	result.append(clampf(float(ego_vehicle.get("current_speed")) / float(ego_vehicle.get("max_speed")), -1.0, 1.0))
+	result.append(clampf(float(ego_vehicle.get("steering_input")), -1.0, 1.0))
+	result.append(clampf(float(state["heading_error"]) / PI, -1.0, 1.0))
+	result.append(clampf(float(state["lane_error"]) / ai_route.lane_width, -1.0, 1.0))
+	result.append(clampf((ai_goal_progress - float(state["progress"])) / MAX_GOAL_DISTANCE, -1.0, 1.0))
+	for lookahead in ROAD_PREVIEW_DISTANCES:
+		var preview_progress := minf(float(state["progress"]) + lookahead, ai_route.length)
+		var lane_offset := _ai_lane_center_offset_at(preview_progress)
+		var preview_point: Vector2 = ai_route.get_position_at(preview_progress, lane_offset)
+		var local_point: Vector2 = ego_vehicle.to_local(preview_point)
+		result.append(clampf(local_point.x / ROAD_PREVIEW_DISTANCES[-1], -1.0, 1.0))
+		result.append(clampf(-local_point.y / ROAD_PREVIEW_DISTANCES[-1], -1.0, 1.0))
+	for lookahead in ROAD_PREVIEW_DISTANCES:
+		var preview_progress := minf(float(state["progress"]) + lookahead, ai_route.length)
+		var max_half_width := float(road_generator.get("maximum_road_width")) * 0.5
+		result.append(clampf(ai_route.get_half_width_at(preview_progress) / maxf(max_half_width, 1.0), 0.0, 1.0))
+	result.append_array([0.0, 0.0, 0.0, 0.0, 1.0])
+	return result
+
+
+func _goal_distance_remaining() -> float:
+	if ai_route == null or not ai_route.is_valid():
+		return 0.0
+	var route_state := _get_ai_route_state()
+	return maxf(ai_goal_progress - float(route_state["progress"]), 0.0)
+
+
+func _ai_lane_center_offset_at(progress: float) -> float:
+	return minf(
+		ai_route.lane_width * 0.5,
+		ai_route.get_half_width_at(progress) * 0.5
+	)
+
+
+func _policy_is_connected() -> bool:
+	return ai_peer != null and ai_peer.get_status() == StreamPeerTCP.STATUS_CONNECTED
+
+
+func _selected_policy_model_path() -> String:
+	return String(POLICY_MODEL_PATHS.get(selected_ai_checkpoint, POLICY_MODEL_PATHS[DEFAULT_AI_CHECKPOINT]))
+
+
+func _selected_checkpoint_label() -> String:
+	if selected_ai_checkpoint == 2:
+		return "276,480-step checkpoint [2]"
+	return "150k best checkpoint [1]"
+
+
+func _ai_driving_status() -> String:
+	var route_note := "%d route turns" % ai_route_turns
+	if not ai_turn_requirement_met:
+		route_note += " (fewer than requested)"
+	return "AI driving — %d-unit goal, %s. Destination marked green." % [
+		roundi(ai_target_distance),
+		route_note
+	]
+
+
+func _minimum_turns_for_target_distance(distance: float) -> int:
+	if distance >= 4200.0:
+		return 4
+	if distance >= 2700.0:
+		return 3
+	if distance >= 1800.0:
+		return 2
+	if distance >= 800.0:
+		return 1
+	return 0
+
+
+func _on_ai_target_distance_changed(distance: float) -> void:
+	ai_target_distance = clampf(distance, MIN_GOAL_DISTANCE, 5500.0)
+	if ai_mode_active:
+		ai_status = "Target set to %d units. Press R to start a new trip at that length." % roundi(ai_target_distance)
+	else:
+		ai_status = "AI target set to %d units. Press I to watch the checkpoint drive." % roundi(ai_target_distance)
+	_update_mode_hud()
+
+
+func _update_mode_hud() -> void:
+	if ai_mode_hud == null:
+		return
+	ai_mode_hud.call("set_mode", ai_mode_active, ai_status, _goal_distance_remaining())
+
+
+func _on_road_regenerated() -> void:
+	if ai_mode_active:
+		_begin_ai_goal()
+	else:
+		place_ego()
+
+
+func _shutdown_policy_service() -> void:
+	if ai_peer != null and ai_peer.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+		ai_peer.put_data((JSON.stringify({"type": "shutdown"}) + "\n").to_utf8_buffer())
+		ai_peer.disconnect_from_host()
+	ai_peer = null
+	ai_connect_pending = false
+	ai_request_in_flight = false
+	if ai_process_id > 0 and OS.is_process_running(ai_process_id):
+		OS.kill(ai_process_id)
+	ai_process_id = -1
 
 
 func place_ego() -> void:
 	var pose: Dictionary = traffic_manager.get_ego_spawn_pose()
-
 	ego_vehicle.position = pose["position"]
 	ego_vehicle.rotation = pose["rotation"]
 
 
-# Restart: clear the crash, put the ego back on its spawn
-# pose and rebuild the traffic from the same seeds, so the
-# simulation returns to its exact initial condition.
 func restart_simulation() -> void:
+	if ai_mode_active:
+		if get_tree().paused:
+			get_tree().paused = false
+		game_over.visible = false
+		_begin_ai_goal()
+		if not ai_failed and ai_process_id <= 0:
+			ai_status = "Loading PPO policy..."
+			_start_policy_service()
+		return
 	ego_vehicle.reset_vehicle()
-
 	place_ego()
-
 	traffic_manager.regenerate()
+	traffic_light_manager.regenerate()
