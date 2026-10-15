@@ -234,7 +234,7 @@ def main() -> None:
         callbacks.append(GuiControlCallback())
 
         if arguments.eval_every > 0:
-            evaluation_env = make_training_env(arguments.godot)
+            evaluation_env = make_training_env(arguments.godot, reward_config)
 
             class SuccessRateEvalCallback(BaseCallback):
                 """Compare checkpoints by a fixed, mixed-difficulty success suite."""
