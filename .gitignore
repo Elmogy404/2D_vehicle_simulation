@@ -4,6 +4,7 @@
 .opencode
 ai/.venv/
 .venv-ai/
+.venv-ai-backup-*/
 ai/models/
 ai/runs/*
 !ai/runs/.gdignore

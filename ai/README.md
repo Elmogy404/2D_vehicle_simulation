@@ -62,6 +62,15 @@ models and periodic checkpoints go under `ai/models/`.
 
 ## Train from the Godot GUI
 
+On a new Windows computer, install Python 3.10+ and Godot 4, then double-click
+`setup_ai_training.cmd` in the project folder. It creates a local `.venv-ai`
+and downloads the AI dependencies; internet access is required. An incompatible
+copied environment is moved to a dated `.venv-ai-backup-*` folder, never deleted.
+When sharing the project, omit `.venv-ai`, `.venv-ai-backup-*`, and `.godot`:
+these are local installations/caches and should be recreated on the other computer.
+Set the AI Training tab's Godot executable to the installed Godot engine `.exe`.
+Training requires the full source project, not only an exported game executable.
+
 Open the top-right settings button and choose the **AI Training** tab. The
 **Main** tab keeps map generation and live checkpoint viewing. Training uses a
 separate Python process, so the game can stay paused or be closed while PPO
@@ -77,6 +86,10 @@ shows training steps and the last evaluation. The run log, control/status
 files, and a JSON copy of the reward weights are saved under `ai/runs/`;
 models and a reproducibility manifest are saved under `ai/models/` unless an
 output folder is set. Reopening the project reconnects to an active GUI run.
+
+Startup logs include the actual Python and trainer paths and the trainer's SHA256
+to identify different copies. Python tracebacks are preserved, and dependency
+failures appear directly in the training status with setup instructions.
 
 Changing reward or PPO settings is a new experiment. To resume, provide the
 checkpoint `.zip`, use its original run name, keep the original reward/PPO

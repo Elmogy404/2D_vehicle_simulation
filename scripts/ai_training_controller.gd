@@ -60,7 +60,7 @@ func start_training(config: Dictionary) -> String:
 	var python_path := String(config.get("python_path", "")).strip_edges()
 	var godot_path := String(config.get("godot_path", "")).strip_edges()
 	if python_path.is_empty() or not FileAccess.file_exists(python_path):
-		return "Select an existing Python executable with the AI dependencies installed."
+		return "Run setup_ai_training.cmd in the project folder, then select .venv-ai/Scripts/python.exe."
 	if godot_path.is_empty() or not FileAccess.file_exists(godot_path):
 		return "Select an existing Godot executable."
 	var script_path := ProjectSettings.globalize_path("res://ai/gui_train_launcher.py")

@@ -388,9 +388,8 @@ func _build_training_tab(tabs: TabContainer) -> void:
 	fields.add_theme_constant_override("separation", 7)
 	scroll.add_child(fields)
 	_training_section(fields, "PROCESS AND MODEL")
-	var python_default := ProjectSettings.globalize_path("res://.venv-ai/Scripts/python.exe")
-	if not FileAccess.file_exists(python_default):
-		python_default = ProjectSettings.globalize_path("res://.venv-ai/bin/python")
+	var python_relative := "res://.venv-ai/Scripts/python.exe" if OS.get_name() == "Windows" else "res://.venv-ai/bin/python"
+	var python_default := ProjectSettings.globalize_path(python_relative)
 	training_inputs["python_path"] = _training_text_field(fields, "Python executable", python_default)
 	training_inputs["godot_path"] = _training_text_field(fields, "Godot executable", OS.get_executable_path())
 	training_inputs["run_name"] = _training_text_field(fields, "Run name (blank = new timestamped run)", "")

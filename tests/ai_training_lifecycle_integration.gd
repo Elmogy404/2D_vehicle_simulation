@@ -23,7 +23,7 @@ func _run_test() -> void:
 		"steps": 1024,
 		"seed": 73,
 		"checkpoint_every": 2048,
-		"eval_every": 0,
+		"eval_every": 4096,
 		"eval_episodes": 8,
 		"early_stop_patience": 0,
 		"success_threshold": 0.9,

@@ -6,6 +6,7 @@ import argparse
 import csv
 from functools import partial
 import json
+import math
 from pathlib import Path
 
 from godot_gym_env import GodotRoadEnv
@@ -171,17 +172,18 @@ def main() -> None:
         arguments.gui_log_path,
     )
     control.write_status("starting", 0, "Starting training worlds")
+    # Align the rollout with whole minibatches, including worker counts such as six.
+    rollout_steps = max(128, 1024 // arguments.n_envs)
+    alignment = arguments.batch_size // math.gcd(arguments.batch_size, arguments.n_envs)
+    rollout_steps = ((rollout_steps + alignment - 1) // alignment) * alignment
     try:
         if arguments.n_envs == 1:
             env = make_training_env(arguments.godot, reward_config)
-            rollout_steps = 1024
         else:
             env = SubprocVecEnv(
                 [partial(make_training_env, arguments.godot, reward_config) for _ in range(arguments.n_envs)],
                 start_method="spawn",
             )
-            # Keep each PPO update near a 1,024-transition batch as workers increase.
-            rollout_steps = max(128, 1024 // arguments.n_envs)
     except Exception as error:
         control.write_status("failed", 0, str(error))
         raise
