@@ -5,6 +5,7 @@
 ai/.venv/
 .venv-ai/
 ai/models/
-ai/runs/
+ai/runs/*
+!ai/runs/.gdignore
 __pycache__/
 *.py[cod]

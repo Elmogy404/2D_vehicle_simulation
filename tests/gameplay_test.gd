@@ -30,6 +30,7 @@ var game_over: Node
 
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	await run_all()
 
 	print("")
@@ -123,13 +124,17 @@ func run_all() -> void:
 	print("== Loading main scene ==")
 
 	main = load("res://scenes/main.tscn").instantiate()
+	main.process_mode = Node.PROCESS_MODE_PAUSABLE
 
 	add_child(main)
-
+	await get_tree().process_frame
+	main.call("_on_environment_generate_requested", 24680, false, 0)
+	main.get_node("TrafficManager").call("set_traffic_enabled", false)
 	await wait_frames(3)
 
 	ego = main.get_node("EgoVehicle")
-	road = main.get_node("RoadGenerator")
+	var road_router: Node = main.get_node("RoadGenerator")
+	road = road_router.get("active_generator") as Node
 	traffic = main.get_node("TrafficManager")
 	hud = main.get_node("SpeedHud")
 	game_over = main.get_node("GameOver")
@@ -166,6 +171,7 @@ func run_all() -> void:
 	print("== Traffic lights ==")
 
 	var light_snapshot: PackedFloat32Array = light_manager.progress_snapshot()
+	var network: RefCounted = road.get_road_network()
 
 	check(
 		light_snapshot.size() >= int(light_manager.get("minimum_lights")),
@@ -178,19 +184,17 @@ func run_all() -> void:
 		light_manager.progress_snapshot() == light_snapshot,
 		"same light seed reproduces identical positions"
 	)
-	var signal_types: PackedStringArray = road.get_intersection_types()
-	var signal_indices: PackedInt32Array = road.get_intersection_indices()
-	var roundabout_feature := signal_types.find("roundabout")
-	var roundabout_progress: float = float(
-		road.get_route().cumulative[signal_indices[roundabout_feature]]
-	)
+	var signal_nodes: Array[int] = network.call("get_intersection_nodes")
+	var signaled_nodes: Dictionary = {}
+	var lights_target_junctions := true
+	for light in light_manager.get("lights"):
+		var node_id := int(light.get("graph_node_id"))
+		if not signal_nodes.has(node_id) or signaled_nodes.has(node_id):
+			lights_target_junctions = false
+		signaled_nodes[node_id] = true
 	check(
-		light_manager.light_for_progress(roundabout_progress) == null,
-		"roundabout uses circulating priority instead of a traffic signal"
-	)
-	check(
-		light_snapshot.size() == signal_indices.size() - signal_types.count("roundabout"),
-		"all signalized junctions receive one seeded traffic-light phase"
+		lights_target_junctions,
+		"signals attach once to non-roundabout graph junctions"
 	)
 
 	# --------------------------------------------------------
@@ -259,7 +263,6 @@ func run_all() -> void:
 		road.get_map_paths().size() > 4,
 		"map exposes arterial, side-road, dead-end, and roundabout paths"
 	)
-	var network: RefCounted = road.get_road_network()
 	check(
 		network.call("graph_is_connected"),
 		"road centerlines form one connected navigation graph"
@@ -324,18 +327,18 @@ func run_all() -> void:
 		minimap_obstacles.size() == road.get_obstacle_regions().size(),
 		"minimap includes every generated obstacle region"
 	)
+	# The pedestrian-cycle assertions wait several simulated seconds. Park the
+	# otherwise stationary test player well outside the active map so a valid
+	# pedestrian crossing cannot turn the test fixture into a collision test.
+	ego.global_position = Vector2(50000.0, 50000.0)
 
 	var pedestrians: Array = pedestrian_manager.get("pedestrians")
-	var pedestrian_intersection_count := 0
-	for feature_type in road.get_intersection_types():
-		if feature_type != "roundabout":
-			pedestrian_intersection_count += 1
-	var expected_pedestrians: int = pedestrian_intersection_count \
-		* int(pedestrian_manager.get("pedestrians_per_intersection"))
+	var expected_pedestrians: int = light_manager.get("lights").size() \
+		* int(pedestrian_manager.get("pedestrians_per_crossing"))
 
 	check(
 		pedestrians.size() == expected_pedestrians,
-		"pedestrians generated at signalized crossings, not roundabouts"
+		"pedestrians generated at signalized graph crossings"
 	)
 
 	var pedestrian_layers_ok: bool = true
@@ -354,10 +357,10 @@ func run_all() -> void:
 		pedestrian_scenes_complete,
 		"each pedestrian has a sprite, hitbox, and linked signal"
 	)
-	var route: RoutePath = road.get_route()
 	var crosswalks: Node = pedestrian_manager.get_node("Crosswalks")
 	var crosswalks_inside_road := crosswalks.get_child_count() > 0
 	var maximum_crosswalk_span := 0.0
+	var maximum_crosswalk_road_width := 0.0
 	var maximum_crosswalk_alpha := 0.0
 	for stripe in crosswalks.get_children():
 		if not stripe is Line2D or stripe.get_point_count() != 2:
@@ -368,52 +371,43 @@ func run_all() -> void:
 			stripe.get_point_position(0).distance_to(stripe.get_point_position(1))
 		)
 		maximum_crosswalk_alpha = maxf(maximum_crosswalk_alpha, stripe.default_color.a)
-		var stripe_progress := float(stripe.get_meta("route_progress"))
-		var road_edges: Dictionary = road.get_road_edges_at(stripe_progress)
-		var left_edge: Vector2 = road_edges["left"]
-		var right_edge: Vector2 = road_edges["right"]
-		var road_span := left_edge.distance_to(right_edge)
-		var expected_inset: float = float(pedestrian_manager.get("crosswalk_edge_inset")) \
-			+ stripe.width * 0.5
-		var cross_road_axis: Vector2 = (right_edge - left_edge).normalized()
-		var expected_start: Vector2 = left_edge + cross_road_axis * expected_inset
-		var expected_end: Vector2 = right_edge - cross_road_axis * expected_inset
-		if road_span <= expected_inset * 2.0 \
-		or stripe.get_point_position(0).distance_to(expected_start) > 0.1 \
-		or stripe.get_point_position(1).distance_to(expected_end) > 0.1:
+		var graph_center: Vector2 = stripe.get_meta("graph_node_center")
+		var half_width: float = float(stripe.get_meta("road_half_width"))
+		maximum_crosswalk_road_width = maxf(maximum_crosswalk_road_width, half_width * 2.0)
+		var node_id: int = int(stripe.get_meta("graph_node_id"))
+		var road_axis: Vector2 = network.call("get_node_axis", node_id).normalized()
+		var road_normal := road_axis.rotated(PI * 0.5)
+		var safe_edge := half_width - float(pedestrian_manager.get("crosswalk_edge_inset"))
+		if absf(
+			stripe.get_point_position(0).distance_to(stripe.get_point_position(1))
+			- safe_edge * 2.0
+		) > 0.1:
 			crosswalks_inside_road = false
 		for point_index in range(2):
 			var point: Vector2 = stripe.get_point_position(point_index)
-			var nearest := route.nearest(point)
-			var local_half_width := route.get_half_width_at(float(nearest["progress"]))
-			if float(nearest["distance"]) + stripe.width * 0.5 \
-			> local_half_width - float(pedestrian_manager.get("crosswalk_edge_inset")) + 2.0:
+			if absf((point - graph_center).dot(road_normal)) > safe_edge + 0.1:
 				crosswalks_inside_road = false
-	var generated_widths: PackedFloat32Array = road.get("road_widths")
-	var maximum_generated_width := 0.0
-	for width in generated_widths:
-		maximum_generated_width = maxf(maximum_generated_width, width)
 	check(
 		crosswalks_inside_road
-		and maximum_crosswalk_span < maximum_generated_width
+		and maximum_crosswalk_span < maximum_crosswalk_road_width
 		and maximum_crosswalk_alpha <= 0.5,
 		"crosswalk bars are small, translucent, and stay inside local road edges"
 	)
 
 	var pedestrian_waiting_zones_clear := true
-	var pedestrians_per_intersection := int(pedestrian_manager.get("pedestrians_per_intersection"))
-	var side_road_half_width := float(road.get("cross_street_width")) * 0.5
-	var required_side_clearance := float(pedestrian_manager.get("side_road_clearance"))
-	var intersection_indices: PackedInt32Array = road.get_intersection_indices()
-	for pedestrian_index in range(pedestrians.size()):
-		var intersection_number := int(pedestrians[pedestrian_index].get("intersection_index"))
-		var route_index := intersection_indices[intersection_number]
-		var progress := float(route.cumulative[route_index])
-		var endpoint: Vector2 = pedestrians[pedestrian_index].get("endpoint_a")
-		var endpoint_progress := float(route.nearest(endpoint)["progress"])
-		var along_offset := absf(endpoint_progress - progress)
-		if along_offset < side_road_half_width + required_side_clearance - 1.0:
-			pedestrian_waiting_zones_clear = false
+	for pedestrian in pedestrians:
+		var node_id := int(pedestrian.get("intersection_index"))
+		var center: Vector2 = network.call("get_node_position", node_id)
+		var axis: Vector2 = network.call("get_node_axis", node_id).normalized()
+		var normal := axis.rotated(PI * 0.5)
+		var curb_distance := float(network.call("get_node_half_width", node_id)) \
+			+ float(pedestrian_manager.get("curb_margin"))
+		for endpoint_name in ["endpoint_a", "endpoint_b"]:
+			var endpoint: Vector2 = pedestrian.get(endpoint_name)
+			if absf((endpoint - center).dot(normal)) < curb_distance - 1.0:
+				pedestrian_waiting_zones_clear = false
+				break
+		if not pedestrian_waiting_zones_clear:
 			break
 	check(
 		pedestrian_waiting_zones_clear,
@@ -442,12 +436,14 @@ func run_all() -> void:
 		)
 		blocker.queue_free()
 		await wait_physics(120)
-		var crossing_nearest := route.nearest(pedestrian.global_position)
-		var crossing_half_width := route.get_half_width_at(
-			float(crossing_nearest["progress"])
-		)
+		var pedestrian_node_id := int(pedestrian.get("intersection_index"))
+		var crossing_center: Vector2 = network.call("get_node_position", pedestrian_node_id)
+		var crossing_axis: Vector2 = network.call("get_node_axis", pedestrian_node_id).normalized()
+		var crossing_normal := crossing_axis.rotated(PI * 0.5)
+		var crossing_half_width := float(network.call("get_node_half_width", pedestrian_node_id))
 		check(
-			float(crossing_nearest["distance"]) <= crossing_half_width + 5.0,
+			absf((pedestrian.global_position - crossing_center).dot(crossing_normal)) \
+			<= crossing_half_width + 5.0,
 			"pedestrian crosses the curb boundary instead of freezing outside the road"
 		)
 
@@ -455,6 +451,7 @@ func run_all() -> void:
 	# CHANGE 1: variable NPC speeds
 	# --------------------------------------------------------
 	print("== CHANGE 1: NPC speeds ==")
+	traffic.call("set_traffic_enabled", true)
 
 	var cars: Array[Node] = traffic_cars()
 
@@ -523,16 +520,28 @@ func run_all() -> void:
 
 		if not lights.is_empty():
 			var test_light: Node = lights[0]
+			var route_before_light_test: RoutePath = sample_car.get("route")
+			var axis_heading := Vector2.RIGHT.rotated(float(test_light.get("axis_rotation")))
+			var test_route := RoutePath.new()
+			var test_points := PackedVector2Array([
+				test_light.global_position - axis_heading * 500.0,
+				test_light.global_position + axis_heading * 500.0
+			])
+			var test_widths := PackedFloat32Array([200.0, 200.0])
+			var test_lanes := PackedFloat32Array([1.0, 1.0])
+			test_route.build(test_points, test_widths, test_lanes, float(road.get("lane_width")))
+			sample_car.set("route", test_route)
+			sample_car.set("progress", 500.0 - float(test_light.get("intersection_width")) * 0.5 - 118.0)
 			test_light.force_state(2)
-			sample_car.set("travel_direction", 1.0)
-			sample_car.set(
-				"progress",
-				test_light.stop_progress_for(1.0) - 100.0
-			)
 			sample_car.set("speed", 100.0)
 			var red_limit: float = sample_car.traffic_light_speed_limit()
 
-			check(red_limit < cruise, "NPC brakes for a red traffic light")
+			check(
+				red_limit < float(sample_car.get("speed")),
+				"NPC brakes below its current speed for a red traffic light (%.1f < %.1f)" % [
+					red_limit, float(sample_car.get("speed"))
+				]
+			)
 			test_light.force_state(0)
 			check(
 				is_equal_approx(
@@ -541,22 +550,26 @@ func run_all() -> void:
 				),
 				"NPC proceeds through a green traffic light"
 			)
+			sample_car.set("route", route_before_light_test)
+			sample_car.set("progress", minf(100.0, route_before_light_test.length * 0.1))
 
 			traffic.regenerate()
 			cars = traffic_cars()
 
 	var cruises: Array[float] = sorted_cruises(cars)
-	var used_lane_indices: Dictionary = {}
 	var spawns_avoid_intersections: bool = true
+	var lane_levels_valid := true
 
 	for car in cars:
-		used_lane_indices[int(car.get("lane_index"))] = true
-
-		if traffic.is_near_intersection(float(car.get("progress"))):
+		var car_route: RoutePath = car.get("route")
+		if car_route == null or int(car.get("lane_index")) >= car_route.get_lane_count_at(float(car.get("progress"))):
+			lane_levels_valid = false
+		if float(car.get("progress")) < float(car.get("vehicle_length")) * 0.25 \
+		or float(car.get("progress")) > car_route.length - float(car.get("vehicle_length")) * 0.5:
 			spawns_avoid_intersections = false
 
-	check(used_lane_indices.size() == 3, "NPCs use all three lane levels")
-	check(spawns_avoid_intersections, "NPCs do not spawn inside intersections")
+	check(lane_levels_valid, "NPC lanes stay within each graph road's lane count")
+	check(spawns_avoid_intersections, "NPC trips begin clear of their graph endpoints")
 
 	var distinct: Dictionary = {}
 
@@ -659,6 +672,8 @@ func run_all() -> void:
 	merging_car.queue_free()
 	through_car.queue_free()
 	traffic.regenerate()
+	traffic.call("set_traffic_enabled", false)
+	pedestrian_manager.call("set_pedestrians_enabled", false)
 
 	# --------------------------------------------------------
 	# CHANGE 2: progressive acceleration
@@ -905,11 +920,22 @@ func run_all() -> void:
 	print("== CHANGE 4: collision / Game Over ==")
 
 	reset_drive_state()
-
-	# Aim the ego at the right-hand wall of the straight
-	# opening section and drive into it.
-	ego.global_position = Vector2(60.0, -20.0)
-	ego.rotation = PI
+	traffic.call("set_traffic_enabled", true)
+	var collision_route: RoutePath = road.get_route()
+	var collision_distance := collision_route.length * 0.5
+	ego.global_position = collision_route.get_position_at(collision_distance, 45.0)
+	ego.rotation = collision_route.get_rotation_at(collision_distance)
+	var crash_wall := StaticBody2D.new()
+	crash_wall.name = "GameplayTestWall"
+	crash_wall.collision_layer = 1
+	crash_wall.collision_mask = 0
+	var crash_shape := CollisionShape2D.new()
+	var crash_circle := CircleShape2D.new()
+	crash_circle.radius = 12.0
+	crash_shape.shape = crash_circle
+	crash_wall.add_child(crash_shape)
+	main.add_child(crash_wall)
+	crash_wall.global_position = ego.global_position + Vector2.UP.rotated(ego.rotation) * 108.0
 
 	Input.action_press("accelerate")
 
@@ -969,6 +995,8 @@ func run_all() -> void:
 		"Game Over shows the actual crash speed (%s)"
 		% (speed_text.text if speed_text != null else "missing")
 	)
+	main.remove_child(crash_wall)
+	crash_wall.queue_free()
 
 	# --------------------------------------------------------
 	# CHANGE 4: restart

@@ -29,6 +29,7 @@ var endpoint_b: Vector2
 var target: Vector2
 var traffic_light: Node
 var intersection_index: int = -1
+var traffic_heading: Vector2 = Vector2.ZERO
 var motion_state: MotionState = MotionState.WAITING_AT_CURB
 var wait_remaining: float = 0.0
 var body_tint: Color = Color.WHITE
@@ -60,7 +61,8 @@ func configure(
 	speed: float,
 	linked_light: Node,
 	color_tint: Color,
-	feature_index: int
+	feature_index: int,
+	linked_traffic_heading: Vector2 = Vector2.ZERO
 ) -> void:
 	endpoint_a = start
 	endpoint_b = finish
@@ -71,10 +73,11 @@ func configure(
 	traffic_light = linked_light
 	body_tint = color_tint
 	intersection_index = feature_index
+	traffic_heading = linked_traffic_heading.normalized()
 	motion_state = MotionState.WAITING_AT_CURB
 	wait_remaining = 0.0
 	_crossed_this_red_phase = false
-	is_crossing = false
+	_set_crossing_active(false)
 	add_to_group("pedestrians")
 	if is_node_ready():
 		sprite.modulate = body_tint
@@ -82,20 +85,22 @@ func configure(
 
 
 func _physics_process(delta: float) -> void:
-	if traffic_light == null or not is_instance_valid(traffic_light):
-		motion_state = MotionState.WAITING_AT_CURB
-		is_crossing = false
-		velocity = Vector2.ZERO
-		return
-
-	var signal_state := int(traffic_light.get("state"))
-	var vehicles_stopped := signal_state == TrafficLight.SignalState.RED
+	# A crossing without a signal is an unsignalized zebra: pedestrians proceed
+	# after their curb wait, and active walkers are visible to NPC car yielding.
+	var vehicles_stopped := true
+	var has_traffic_signal := traffic_light != null and is_instance_valid(traffic_light)
+	if has_traffic_signal:
+		var signal_state := int(traffic_light.get("state"))
+		if traffic_heading.length_squared() > 0.5 \
+		and traffic_light.has_method("state_for_heading"):
+			signal_state = int(traffic_light.call("state_for_heading", traffic_heading))
+		vehicles_stopped = signal_state == TrafficLight.SignalState.RED
 	if not vehicles_stopped:
 		_crossed_this_red_phase = false
 
 	if motion_state == MotionState.WAITING_AT_CURB:
 		velocity = Vector2.ZERO
-		is_crossing = false
+		_set_crossing_active(false)
 		if wait_remaining > 0.0:
 			wait_remaining = maxf(wait_remaining - delta, 0.0)
 			_update_sprite(false, target - global_position, delta)
@@ -104,7 +109,7 @@ func _physics_process(delta: float) -> void:
 			_update_sprite(false, target - global_position, delta)
 			return
 		motion_state = MotionState.CROSSING
-		is_crossing = true
+		_set_crossing_active(true)
 		_crossed_this_red_phase = true
 
 	var to_target := target - global_position
@@ -112,9 +117,11 @@ func _physics_process(delta: float) -> void:
 		global_position = target
 		velocity = Vector2.ZERO
 		motion_state = MotionState.WAITING_AT_CURB
-		is_crossing = false
+		_set_crossing_active(false)
 		wait_remaining = wait_duration
 		target = endpoint_a if target.distance_squared_to(endpoint_b) < 0.01 else endpoint_b
+		if not has_traffic_signal:
+			_crossed_this_red_phase = false
 		_update_sprite(false, target - global_position, delta)
 		return
 
@@ -122,6 +129,16 @@ func _physics_process(delta: float) -> void:
 	velocity = facing * walking_speed
 	move_and_slide()
 	_update_sprite(true, facing, delta)
+
+
+func _set_crossing_active(active: bool) -> void:
+	if is_crossing == active:
+		return
+	is_crossing = active
+	if active:
+		add_to_group("crossing_pedestrians")
+	else:
+		remove_from_group("crossing_pedestrians")
 
 
 func _update_sprite(walking: bool, direction: Vector2, delta: float) -> void:

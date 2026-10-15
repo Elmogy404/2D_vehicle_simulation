@@ -22,6 +22,9 @@ planned-road points in ego coordinates; road half-width at those points; and
 five reserved traffic-light slots. Setup 2 still has no cars, pedestrians, or
 signals, so the reserved slots indicate “no signal.” PPO controls steering and
 signed acceleration/braking; the training adapter prevents unintended reverse.
+The shared ego car now tops out at 150 km/h (500 world units/s), and training
+can award a small per-step bonus at 98% of that speed or higher while making
+forward progress on the road. Set **Top-speed reward** to zero to disable it.
 
 ## Train and evaluate Setup 2
 
@@ -56,6 +59,33 @@ streak with `--early-stop-patience N`, or disable it with
 still applies. The best checkpoint is selected by overall success, then crash
 and off-road rates. Logs and CSV evaluation results go under `ai/runs/`, while
 models and periodic checkpoints go under `ai/models/`.
+
+## Train from the Godot GUI
+
+Open the top-right settings button and choose the **AI Training** tab. The
+**Main** tab keeps map generation and live checkpoint viewing. Training uses a
+separate Python process, so the game can stay paused or be closed while PPO
+runs. The tab finds `.venv-ai/Scripts/python.exe` and the running Godot
+executable by default; edit either path if your installation differs.
+
+Set the worker count (each worker launches one headless Godot world), total
+timesteps, seed, PPO parameters, checkpoint/evaluation intervals, early-stop
+threshold, and reward/penalty weights before pressing **Start training**.
+**Pause** waits for the current environment step, **Resume** continues, and
+**End and save** stops cleanly and saves the latest policy. The progress area
+shows training steps and the last evaluation. The run log, control/status
+files, and a JSON copy of the reward weights are saved under `ai/runs/`;
+models and a reproducibility manifest are saved under `ai/models/` unless an
+output folder is set. Reopening the project reconnects to an active GUI run.
+
+Changing reward or PPO settings is a new experiment. To resume, provide the
+checkpoint `.zip`, use its original run name, keep the original reward/PPO
+settings, and set total timesteps above the checkpoint's current step count.
+The trainer rejects a mismatch when a run manifest is available.
+
+Episode spawning now checks the *whole car body plus margin* against road
+colliders and retries seeded route/start candidates. A reset reports an error
+instead of placing the car on an obstructed curb if no safe start exists.
 
 Use a fresh held-out seed range for final evaluation. `--output-csv` saves
 per-episode outcomes, including the selected route's turn count. `--visible`

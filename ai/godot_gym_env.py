@@ -25,6 +25,7 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
         godot_executable: str | None = None,
         *,
         visible: bool = False,
+        reward_config: dict[str, float] | None = None,
     ) -> None:
         super().__init__()
         self.action_space = spaces.Box(
@@ -38,6 +39,7 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
             dtype=np.float32,
         )
         self.bridge = GodotBridge(godot_executable, visible=visible)
+        self.reward_config = dict(reward_config or {})
 
     def reset(
         self,
@@ -51,8 +53,10 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
             if seed is not None
             else int(self.np_random.integers(1, 2**31 - 1))
         )
+        reset_options = dict(options or {})
+        reset_options["reward_config"] = self.reward_config
         response = self.bridge.request(
-            {"type": "reset", "seed": episode_seed, "options": options or {}}
+            {"type": "reset", "seed": episode_seed, "options": reset_options}
         )
         observation = np.asarray(response["observation"], dtype=np.float32)
         self._validate_observation(observation)

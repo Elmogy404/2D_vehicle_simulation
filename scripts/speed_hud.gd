@@ -57,8 +57,8 @@ func _build_interface() -> void:
 	box.name = "SpeedBox"
 	box.set_anchors_preset(Control.PRESET_TOP_RIGHT)
 	box.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	box.offset_left = -220.0
-	box.offset_right = -16.0
+	box.offset_left = -280.0
+	box.offset_right = -82.0
 	box.offset_top = 16.0
 	box.offset_bottom = -1.0
 	box.mouse_filter = Control.MOUSE_FILTER_IGNORE

@@ -1,0 +1,10 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/road_piece_catalog.gd" id="1_catalog"]
+
+[node name="RoadPieceCatalog" type="Node2D"]
+script = ExtResource("1_catalog")
+
+[node name="Camera2D" type="Camera2D" parent="."]
+position = Vector2(0, 0)
+zoom = Vector2(0.15, 0.15)

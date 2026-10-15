@@ -12,14 +12,15 @@ func _initialize() -> void:
 func _run() -> void:
 	main_scene = MAIN_SCENE.instantiate()
 	root.add_child(main_scene)
+	var settings: Node = main_scene.get_node("SettingsPopup")
+	settings.emit_signal("generate_requested", 333333333, false, 0)
 	await process_frame
 	await process_frame
 
 	var traffic_manager: Node = main_scene.get_node("TrafficManager")
 	var lights: Node = main_scene.get_node("TrafficLightManager")
 	var pedestrians: Node = main_scene.get_node("PedestrianManager")
-	var hud: Node = main_scene.get_node("AiModeHud")
-	var slider: HSlider = hud.get("target_slider")
+	var slider: HSlider = settings.get("target_slider")
 	if slider == null or not is_equal_approx(slider.min_value, 250.0) \
 	or not is_equal_approx(slider.max_value, 5500.0):
 		_fail("AI target-distance slider is missing or has the wrong trained range")
@@ -78,7 +79,7 @@ func _run() -> void:
 	if not bool(main_scene.get("ai_ever_connected")) \
 	or int(main_scene.get("ai_request_id")) < 2 \
 	or bool(main_scene.get("ai_request_in_flight")):
-		_fail("Godot did not receive a Setup 2 PPO action before the timeout")
+		_fail("Godot did not receive a Setup 2 PPO action before the timeout (%s)" % _policy_debug_state())
 		return
 
 	slider.value = 1000.0
@@ -111,7 +112,7 @@ func _run() -> void:
 	if not bool(main_scene.get("ai_ever_connected")) \
 	or int(main_scene.get("ai_request_id")) < 2 \
 	or bool(main_scene.get("ai_request_in_flight")):
-		_fail("key 2 checkpoint did not return a PPO action")
+		_fail("key 2 checkpoint did not return a PPO action (%s)" % _policy_debug_state())
 		return
 
 	_press_main_key(KEY_I)
@@ -136,6 +137,18 @@ func _fail(message: String) -> void:
 	and bool(main_scene.get("ai_mode_active")):
 		main_scene.call("toggle_ai_mode")
 	quit(1)
+
+
+func _policy_debug_state() -> String:
+	var peer: StreamPeerTCP = main_scene.get("ai_peer")
+	return "status=%s paused=%s request=%d pending=%s peer=%d process=%d" % [
+		String(main_scene.get("ai_status")),
+		str(paused),
+		int(main_scene.get("ai_request_id")),
+		str(main_scene.get("ai_request_in_flight")),
+		int(peer.get_status()) if peer != null else -1,
+		int(main_scene.get("ai_process_id"))
+	]
 
 
 func _press_main_key(key_code: int) -> void:

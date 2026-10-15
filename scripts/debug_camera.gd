@@ -45,7 +45,15 @@ func _process(delta: float) -> void:
 			"camera_up",
 			"camera_down"
 		)
-
+		if Input.is_physical_key_pressed(KEY_A):
+			direction.x -= 1.0
+		if Input.is_physical_key_pressed(KEY_D):
+			direction.x += 1.0
+		if Input.is_physical_key_pressed(KEY_W):
+			direction.y -= 1.0
+		if Input.is_physical_key_pressed(KEY_S):
+			direction.y += 1.0
+		direction = direction.limit_length()
 
 		var current_speed := move_speed
 
@@ -54,11 +62,7 @@ func _process(delta: float) -> void:
 			current_speed *= fast_move_multiplier
 
 
-		position += (
-			direction
-			* current_speed
-			* delta
-		)
+		position += direction * current_speed * delta / maxf(zoom.x, 0.01)
 
 
 	# --------------------------------------------------------
@@ -77,11 +81,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	# --------------------------------------------------------
 	if event is InputEventKey:
 		if event.pressed and not event.echo:
-			if event.keycode == KEY_C:
-				toggle_camera()
-
-
-			elif event.keycode == KEY_R:
+			if event.keycode == KEY_R or event.physical_keycode == KEY_R:
 				reset_debug_camera()
 
 
@@ -99,18 +99,15 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			target_zoom += zoom_step
+			adjust_zoom(zoom_step)
 
 
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			target_zoom -= zoom_step
+			adjust_zoom(-zoom_step)
 
 
-		target_zoom = clamp(
-			target_zoom,
-			min_zoom,
-			max_zoom
-		)
+func adjust_zoom(amount: float) -> void:
+	target_zoom = clampf(target_zoom + amount, min_zoom, max_zoom)
 
 
 # ============================================================

@@ -15,9 +15,7 @@ const JUNCTION_EDGE_CLEARANCE := 4.0
 @export var segment_length: float = 60.0
 
 @export_category("Road Complexity")
-@export var minimum_road_width: float = 190.0
 @export var maximum_road_width: float = 280.0
-@export var width_change_smoothing: float = 0.16
 @export_range(5, 8, 1) var intersection_count: int = 6
 ## Distance across the whole district between the two collector roads. This
 ## leaves real block space between a six-lane arterial and local streets.
@@ -31,7 +29,6 @@ const JUNCTION_EDGE_CLEARANCE := 4.0
 @export var roundabout_radius: float = 125.0
 @export_range(1, 5, 1) var turnaround_count: int = 2
 @export var turnaround_width: float = 360.0
-@export_range(1, 3, 1) var minimum_lanes_per_direction: int = 1
 @export_range(1, 3, 1) var maximum_lanes_per_direction: int = 3
 @export var lane_width: float = 90.0
 @export var shoulder_width: float = 10.0
@@ -91,6 +88,9 @@ const JUNCTION_EDGE_CLEARANCE := 4.0
 
 ## Press R while the game is running to generate a new random road.
 @export var enable_hotkeys: bool = true
+## The simulation's generator router disables this and requests generation
+## explicitly after the user chooses a road-generation mode.
+@export var generate_on_ready: bool = true
 
 
 # ============================================================
@@ -175,7 +175,8 @@ var steer_hold: int = 0
 # ============================================================
 
 func _ready() -> void:
-	generate_road()
+	if generate_on_ready:
+		generate_road()
 
 
 func _unhandled_input(event: InputEvent) -> void:

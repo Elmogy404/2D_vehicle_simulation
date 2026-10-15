@@ -38,6 +38,7 @@ var lane_profile: PackedFloat32Array = PackedFloat32Array()
 var lane_width: float = 90.0
 
 var length: float = 0.0
+var max_segment_length: float = 0.0
 
 
 # ============================================================
@@ -63,6 +64,7 @@ func build(
 	lane_width = new_lane_width
 
 	length = 0.0
+	max_segment_length = 0.0
 
 
 	for point in new_points:
@@ -75,6 +77,7 @@ func build(
 				continue
 
 			length += step
+			max_segment_length = maxf(max_segment_length, step)
 
 		points.append(point)
 		cumulative.append(length)
@@ -314,7 +317,7 @@ func nearest(
 			result["progress"] = (
 				cumulative[i]
 				+
-				t * sqrt(segment_length_squared)
+				t * (cumulative[i + 1] - cumulative[i])
 			)
 
 

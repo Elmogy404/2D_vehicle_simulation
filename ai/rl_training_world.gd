@@ -6,6 +6,9 @@ const ACTION_REPEAT := 4
 const MAX_EPISODE_STEPS := 1800
 const MAX_GOAL_DISTANCE := 6000.0
 const ROUTE_ENDPOINT_CLEARANCE := 80.0
+const SPAWN_ROUTE_ATTEMPTS := 12
+const SPAWN_SAMPLE_SPACING := 40.0
+const SPAWN_BODY_MARGIN := 10.0
 const GOAL_DISTANCE_STAGES := [
 	Vector2(250.0, 400.0),
 	Vector2(400.0, 650.0),
@@ -21,6 +24,18 @@ const CURRICULUM_ADVANCE_RATE := 0.8
 const GOAL_RADIUS := 85.0
 const ROAD_PREVIEW_DISTANCES := [60.0, 120.0, 240.0, 400.0]
 const OBSERVATION_SIZE := 31
+const DEFAULT_REWARD_CONFIG := {
+	"progress_gain": 1.0,
+	"max_speed_reward": 0.05,
+	"lane_penalty": 0.12,
+	"edge_penalty": 0.6,
+	"heading_penalty": 0.08,
+	"step_penalty": 0.01,
+	"crash_penalty": 35.0,
+	"off_road_penalty": 35.0,
+	"goal_reward": 40.0,
+	"timeout_penalty": 20.0,
+}
 
 var road_generator: Node
 var ego: CharacterBody2D
@@ -48,6 +63,7 @@ var episode_goal_distance := 0.0
 var episode_route_turns := 0
 var episode_turn_requirement_met := true
 var visible_mode := false
+var reward_config: Dictionary = DEFAULT_REWARD_CONFIG.duplicate()
 
 
 func _ready() -> void:
@@ -143,6 +159,11 @@ func _handle_request(line: String) -> void:
 		"reset":
 			var options_value: Variant = message.get("options", {})
 			var reset_options: Dictionary = options_value if options_value is Dictionary else {}
+			var reward_error := _set_reward_config(reset_options.get("reward_config", {}))
+			if not reward_error.is_empty():
+				_send_message({"error": reward_error})
+				request_busy = false
+				return
 			var requested_stage := int(reset_options.get("curriculum_stage", -1))
 			var use_curriculum := bool(reset_options.get("curriculum", true))
 			var reset_error: String = await _reset_episode(
@@ -163,6 +184,7 @@ func _handle_request(line: String) -> void:
 					"start_progress": start_progress,
 					"goal_progress": goal_progress,
 					"goal_distance": episode_goal_distance,
+					"spawn_clear": true,
 					"curriculum_stage": active_episode_stage,
 					"route_turns": episode_route_turns,
 					"turn_requirement_met": episode_turn_requirement_met
@@ -179,6 +201,23 @@ func _handle_request(line: String) -> void:
 		_:
 			_send_message({"error": "unknown request type"})
 	request_busy = false
+
+
+func _set_reward_config(value: Variant) -> String:
+	if not value is Dictionary:
+		return "reward_config must be an object"
+	var supplied: Dictionary = value
+	reward_config = DEFAULT_REWARD_CONFIG.duplicate()
+	for key in supplied:
+		if not reward_config.has(key):
+			return "unknown reward setting: %s" % String(key)
+		if typeof(supplied[key]) != TYPE_FLOAT and typeof(supplied[key]) != TYPE_INT:
+			return "reward setting %s must be numeric" % String(key)
+		var numeric := float(supplied[key])
+		if is_nan(numeric) or is_inf(numeric) or numeric < 0.0 or numeric > 1000.0:
+			return "reward setting %s must be finite and between 0 and 1000" % String(key)
+		reward_config[key] = numeric
+	return ""
 
 
 func _reset_episode(
@@ -202,34 +241,41 @@ func _reset_episode(
 	episode_rng.seed = posmod(new_seed ^ 0x5EED123, 2147483647)
 	var goal_range: Vector2 = GOAL_DISTANCE_STAGES[active_episode_stage]
 	var network: Object = road_generator.call("get_road_network")
-	var route_data: Dictionary = network.call(
-		"choose_random_route",
-		goal_range.x + ROUTE_ENDPOINT_CLEARANCE * 2.0,
-		goal_range.y + ROUTE_ENDPOINT_CLEARANCE * 3.0,
-		_minimum_turns_for_stage(active_episode_stage),
-		episode_rng
-	)
-	if route_data.is_empty():
-		return "route planner found no %0.0f–%0.0f unit route for seed %d at stage %d" % [
-			goal_range.x,
-			goal_range.y,
-			new_seed,
-			active_episode_stage
+	var route_data: Dictionary = {}
+	var valid_start := -1.0
+	for _attempt in range(SPAWN_ROUTE_ATTEMPTS):
+		var candidate_data: Dictionary = network.call(
+			"choose_random_route",
+			goal_range.x + ROUTE_ENDPOINT_CLEARANCE * 2.0,
+			goal_range.y + ROUTE_ENDPOINT_CLEARANCE * 3.0,
+			_minimum_turns_for_stage(active_episode_stage),
+			episode_rng
+		)
+		if candidate_data.is_empty():
+			continue
+		var candidate_route := RoutePath.new()
+		candidate_route.build(
+			candidate_data["points"],
+			candidate_data["half_widths"],
+			PackedFloat32Array(),
+			float(road_generator.get("lane_width"))
+		)
+		if not candidate_route.is_valid():
+			continue
+		var candidate_start := _find_safe_spawn_progress(candidate_route, goal_range.x)
+		if candidate_start < 0.0:
+			continue
+		route = candidate_route
+		route_data = candidate_data
+		valid_start = candidate_start
+		break
+	if valid_start < 0.0:
+		return "no collision-free spawn was found for seed %d at curriculum stage %d" % [
+			new_seed, active_episode_stage
 		]
-	route = RoutePath.new()
-	var route_points: PackedVector2Array = route_data["points"]
-	var route_half_widths: PackedFloat32Array = route_data["half_widths"]
-	route.build(
-		route_points,
-		route_half_widths,
-		PackedFloat32Array(),
-		float(road_generator.get("lane_width"))
-	)
-	if not route.is_valid():
-		return "route planner returned an invalid route for seed %d" % new_seed
 	episode_route_turns = int(route_data["turns"])
 	episode_turn_requirement_met = bool(route_data["turn_requirement_met"])
-	start_progress = minf(ROUTE_ENDPOINT_CLEARANCE, route.length * 0.1)
+	start_progress = valid_start
 	var available_goal_distance := route.length - start_progress - ROUTE_ENDPOINT_CLEARANCE * 0.5
 	var maximum_goal_distance := minf(goal_range.y, available_goal_distance)
 	if maximum_goal_distance < goal_range.x:
@@ -245,11 +291,50 @@ func _reset_episode(
 	ego.global_rotation = route.get_rotation_at(start_progress)
 	ego.set_control(0.0, 0.0, 0.0)
 	await get_tree().physics_frame
+	if bool(ego.get("has_crashed")) or not _spawn_pose_is_clear(route, start_progress):
+		return "selected spawn became obstructed for seed %d" % new_seed
 	var sensors: Node = ego.get_node("SensorRig")
 	sensors.call("update_sensors")
 	episode_active = true
 	queue_redraw()
 	return ""
+
+
+func _find_safe_spawn_progress(candidate_route: RoutePath, minimum_goal_distance: float) -> float:
+	var latest_start := candidate_route.length - minimum_goal_distance \
+		- ROUTE_ENDPOINT_CLEARANCE * 0.5
+	var earliest_start := minf(ROUTE_ENDPOINT_CLEARANCE, candidate_route.length * 0.1)
+	if latest_start < earliest_start:
+		return -1.0
+	for sample_index in range(16):
+		var progress := earliest_start + float(sample_index) * SPAWN_SAMPLE_SPACING
+		if progress > latest_start:
+			break
+		if _spawn_pose_is_clear(candidate_route, progress):
+			return progress
+	return -1.0
+
+
+func _spawn_pose_is_clear(candidate_route: RoutePath, progress: float) -> bool:
+	var body := ego.get_node("CollisionShape2D") as CollisionShape2D
+	var vehicle_shape := body.shape as RectangleShape2D
+	if vehicle_shape == null:
+		return false
+	var half_width := candidate_route.get_half_width_at(progress)
+	var lane_offset := _lane_center_offset_for_route(candidate_route, progress)
+	if half_width - absf(lane_offset) < vehicle_shape.size.x * 0.5 + SPAWN_BODY_MARGIN:
+		return false
+	var clearance_shape := RectangleShape2D.new()
+	clearance_shape.size = vehicle_shape.size + Vector2.ONE * SPAWN_BODY_MARGIN * 2.0
+	var query := PhysicsShapeQueryParameters2D.new()
+	query.shape = clearance_shape
+	query.collision_mask = 1
+	query.collide_with_areas = false
+	query.exclude = [ego.get_rid()]
+	var space := get_world_2d().direct_space_state
+	var position := candidate_route.get_position_at(progress, lane_offset)
+	query.transform = Transform2D(candidate_route.get_rotation_at(progress), position)
+	return space.intersect_shape(query, 1).is_empty()
 
 
 func _step_episode(action_value: Variant) -> void:
@@ -285,11 +370,11 @@ func _step_episode(action_value: Variant) -> void:
 	var heading_ratio := clampf(absf(float(state["heading_error"])) / (PI * 0.5), 0.0, 1.0)
 	# Progress shaping is intentionally bounded: completing the route must be
 	# worth more than accumulating distance before leaving the pavement.
-	var reward := clampf(progress_delta / 100.0, -0.25, 0.5)
-	reward -= 0.12 * pow(minf(lane_error_ratio, 2.0), 2.0)
-	reward -= 0.6 * pow(edge_pressure, 2.0)
-	reward -= 0.08 * pow(heading_ratio, 2.0)
-	reward -= 0.01
+	var reward := float(reward_config["progress_gain"]) * clampf(progress_delta / 100.0, -0.25, 0.5)
+	reward -= float(reward_config["lane_penalty"]) * pow(minf(lane_error_ratio, 2.0), 2.0)
+	reward -= float(reward_config["edge_penalty"]) * pow(edge_pressure, 2.0)
+	reward -= float(reward_config["heading_penalty"]) * pow(heading_ratio, 2.0)
+	reward -= float(reward_config["step_penalty"])
 
 	var terminated := false
 	var truncated := false
@@ -297,18 +382,20 @@ func _step_episode(action_value: Variant) -> void:
 	var off_road := absf(float(state["lateral_offset"])) \
 		> float(state["half_width"]) - float(ego.get("vehicle_width")) * 0.5
 	if bool(ego.get("has_crashed")):
-		reward -= 35.0
+		reward -= float(reward_config["crash_penalty"])
 		terminated = true
 	elif off_road:
-		reward -= 35.0
+		reward -= float(reward_config["off_road_penalty"])
 		terminated = true
 	elif ego.global_position.distance_to(goal_position) <= GOAL_RADIUS:
-		reward += 40.0
+		reward += float(reward_config["goal_reward"])
 		terminated = true
 		success = true
 	elif episode_steps >= MAX_EPISODE_STEPS:
-		reward -= 20.0
+		reward -= float(reward_config["timeout_penalty"])
 		truncated = true
+	if not terminated and not truncated:
+		reward += _max_speed_bonus(progress_delta, off_road)
 
 	last_progress = current_progress
 	if terminated or truncated:
@@ -336,6 +423,17 @@ func _step_episode(action_value: Variant) -> void:
 			"episode_steps": episode_steps
 		}
 	})
+
+
+func _max_speed_bonus(progress_delta: float, off_road: bool) -> float:
+	# A small per-step bonus for forward driving at (or very near) the speed
+	# limiter. Do not pay it for crashes, leaving the road, or stationary spins.
+	if ego == null or off_road or bool(ego.get("has_crashed")) or progress_delta <= 0.0:
+		return 0.0
+	var speed_limit := float(ego.get("max_speed"))
+	if speed_limit <= 0.0 or float(ego.get("current_speed")) < speed_limit * 0.98:
+		return 0.0
+	return float(reward_config["max_speed_reward"])
 
 
 func _record_curriculum_outcome(success: bool) -> void:
@@ -403,7 +501,11 @@ func _minimum_turns_for_stage(stage: int) -> int:
 
 
 func _lane_center_offset_at(progress: float) -> float:
-	var half_width := route.get_half_width_at(progress)
+	return _lane_center_offset_for_route(route, progress)
+
+
+func _lane_center_offset_for_route(candidate_route: RoutePath, progress: float) -> float:
+	var half_width := candidate_route.get_half_width_at(progress)
 	var nominal_lane_width := float(road_generator.get("lane_width"))
 	# Keep the ego in its direction's half of narrow local roads while matching
 	# the existing lane-center offset on the wider arterial.

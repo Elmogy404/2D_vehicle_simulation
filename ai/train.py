@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import csv
 from functools import partial
+import json
 from pathlib import Path
 
 from godot_gym_env import GodotRoadEnv
+from training_control import TrainingControl, parse_reward_config
 
 
 def load_sb3_checkpoint(path: str, env: object) -> object:
@@ -34,10 +36,10 @@ def load_sb3_checkpoint(path: str, env: object) -> object:
         return PPO.load(path, env=env, device="cpu")
 
 
-def make_training_env(godot_executable: str | None) -> object:
+def make_training_env(godot_executable: str | None, reward_config: dict[str, float]) -> object:
     from stable_baselines3.common.monitor import Monitor
 
-    return Monitor(GodotRoadEnv(godot_executable))
+    return Monitor(GodotRoadEnv(godot_executable, reward_config=reward_config))
 
 
 def main() -> None:
@@ -50,6 +52,10 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=1_000_000)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--n-envs", type=int, default=1, help="Parallel Godot training worlds")
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--gamma", type=float, default=0.995)
+    parser.add_argument("--entropy-coefficient", type=float, default=0.01)
     parser.add_argument("--checkpoint-every", type=int, default=10_240)
     parser.add_argument(
         "--run-name",
@@ -79,11 +85,36 @@ def main() -> None:
         help="Resume a checkpoint from the same reward-version/run name up to --steps total",
     )
     parser.add_argument("--godot", help="Godot 4 executable; defaults to GODOT_BIN/PATH")
+    parser.add_argument("--reward-config", help="JSON overrides for this run's reward weights")
+    parser.add_argument("--reward-config-file", help="JSON file with reward weights for this run")
+    parser.add_argument("--control-file", help="JSON command file used by the Godot training GUI")
+    parser.add_argument("--status-file", help="JSON status file read by the Godot training GUI")
+    parser.add_argument("--gui-log-path", default="", help="Log path displayed by the Godot training GUI")
+    parser.add_argument("--run-id", default="cli", help="Unique ID guarding GUI control commands")
+    parser.add_argument("--output-root", help="Directory for models and evaluation logs; defaults to ai/")
     arguments = parser.parse_args()
+    if arguments.reward_config and arguments.reward_config_file:
+        parser.error("use either --reward-config or --reward-config-file, not both")
+    try:
+        reward_source = (
+            Path(arguments.reward_config_file).read_text(encoding="utf-8")
+            if arguments.reward_config_file else arguments.reward_config
+        )
+        reward_config = parse_reward_config(reward_source)
+    except (OSError, ValueError, TypeError) as error:
+        parser.error(str(error))
     if arguments.steps < 1:
         parser.error("--steps must be at least 1")
     if arguments.n_envs < 1:
         parser.error("--n-envs must be at least 1")
+    if not 0.0 < arguments.learning_rate <= 0.01:
+        parser.error("--learning-rate must be positive and at most 0.01")
+    if arguments.batch_size < 1:
+        parser.error("--batch-size must be positive")
+    if not 0.0 < arguments.gamma < 1.0:
+        parser.error("--gamma must be between 0 and 1")
+    if not 0.0 <= arguments.entropy_coefficient <= 1.0:
+        parser.error("--entropy-coefficient must be between 0 and 1")
     if arguments.checkpoint_every < 1:
         parser.error("--checkpoint-every must be at least 1")
     if arguments.eval_every < 0:
@@ -104,22 +135,56 @@ def main() -> None:
             "start fresh after changing the reward"
         )
 
-    model_dir = Path(__file__).resolve().parent / "models"
+    output_root = Path(arguments.output_root).resolve() if arguments.output_root else Path(__file__).resolve().parent
+    model_dir = output_root / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = model_dir / f"{arguments.run_name}_training_config.json"
+    manifest = {
+        "reward_config": reward_config,
+        "learning_rate": arguments.learning_rate,
+        "batch_size": arguments.batch_size,
+        "gamma": arguments.gamma,
+        "entropy_coefficient": arguments.entropy_coefficient,
+    }
+    if arguments.resume and manifest_path.exists():
+        previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if previous_manifest != manifest:
+            parser.error(
+                "resume settings differ from this run's saved reward/PPO settings; "
+                "keep the original values or start a new run"
+            )
+    elif arguments.resume:
+        print("Warning: no run manifest exists; reward/PPO settings cannot be verified.", flush=True)
+    else:
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     checkpoint_dir = model_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    runs_dir = Path(__file__).resolve().parent / "runs"
+    runs_dir = output_root / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
-    if arguments.n_envs == 1:
-        env = make_training_env(arguments.godot)
-        rollout_steps = 1024
-    else:
-        env = SubprocVecEnv(
-            [partial(make_training_env, arguments.godot) for _ in range(arguments.n_envs)],
-            start_method="spawn",
-        )
-        # Keep each PPO update near a 1,024-transition batch as workers increase.
-        rollout_steps = max(128, 1024 // arguments.n_envs)
+    control = TrainingControl(
+        arguments.control_file,
+        arguments.status_file,
+        arguments.run_id,
+        arguments.run_name,
+        arguments.steps,
+        arguments.n_envs,
+        arguments.gui_log_path,
+    )
+    control.write_status("starting", 0, "Starting training worlds")
+    try:
+        if arguments.n_envs == 1:
+            env = make_training_env(arguments.godot, reward_config)
+            rollout_steps = 1024
+        else:
+            env = SubprocVecEnv(
+                [partial(make_training_env, arguments.godot, reward_config) for _ in range(arguments.n_envs)],
+                start_method="spawn",
+            )
+            # Keep each PPO update near a 1,024-transition batch as workers increase.
+            rollout_steps = max(128, 1024 // arguments.n_envs)
+    except Exception as error:
+        control.write_status("failed", 0, str(error))
+        raise
     evaluation_env: object | None = None
     try:
         if arguments.resume:
@@ -141,11 +206,11 @@ def main() -> None:
                 verbose=1,
                 seed=arguments.seed,
                 n_steps=rollout_steps,
-                batch_size=64,
-                learning_rate=3e-4,
-                gamma=0.995,
+                batch_size=arguments.batch_size,
+                learning_rate=arguments.learning_rate,
+                gamma=arguments.gamma,
                 gae_lambda=0.95,
-                ent_coef=0.01,
+                ent_coef=arguments.entropy_coefficient,
                 device="cpu",
             )
             remaining_steps = arguments.steps
@@ -158,6 +223,15 @@ def main() -> None:
                 verbose=1,
             )
         ]
+
+        class GuiControlCallback(BaseCallback):
+            def _on_training_start(self) -> None:
+                control.write_status("running", self.num_timesteps, "Training in progress")
+
+            def _on_step(self) -> bool:
+                return control.poll(self.num_timesteps)
+
+        callbacks.append(GuiControlCallback())
 
         if arguments.eval_every > 0:
             evaluation_env = make_training_env(arguments.godot)
@@ -209,6 +283,8 @@ def main() -> None:
                     if self.num_timesteps < self.next_eval_timestep:
                         return True
                     self.next_eval_timestep += arguments.eval_every
+                    if not control.poll(self.num_timesteps):
+                        return False
 
                     outcomes: list[dict[str, float | bool | int]] = []
                     for episode in range(arguments.eval_episodes):
@@ -224,6 +300,8 @@ def main() -> None:
                         steps = 0
                         final_info: dict[str, object] = {}
                         while True:
+                            if steps % 64 == 0 and not control.poll(self.num_timesteps):
+                                return False
                             action, _state = self.model.predict(
                                 observation, deterministic=True
                             )
@@ -332,6 +410,15 @@ def main() -> None:
                         ),
                         flush=True,
                     )
+                    control.last_evaluation = {
+                        "timesteps": self.num_timesteps,
+                        "success_rate": success_rate,
+                        "crash_rate": crash_rate,
+                        "off_road_rate": off_road_rate,
+                        "longest_stage_success_rate": longest_stage_success_rate,
+                        "best_checkpoint_saved": save_best,
+                    }
+                    control.write_status("running", self.num_timesteps, "Evaluation complete")
                     with self.csv_path.open("a", newline="", encoding="utf-8") as csv_file:
                         csv.writer(csv_file).writerow(
                             [
@@ -374,8 +461,17 @@ def main() -> None:
             reset_num_timesteps=not bool(arguments.resume),
         )
         output = model_dir / arguments.run_name
+        control.write_status("saving", model.num_timesteps, "Saving the latest PPO model")
         model.save(output)
         print(f"Saved PPO policy to {output}.zip")
+        control.write_status(
+            "stopped" if control.stop_requested else "completed",
+            model.num_timesteps,
+            f"Model saved to {output}.zip",
+        )
+    except Exception as error:
+        control.write_status("failed", model.num_timesteps if "model" in locals() else 0, str(error))
+        raise
     finally:
         if evaluation_env is not None:
             evaluation_env.close()

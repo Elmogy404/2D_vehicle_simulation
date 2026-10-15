@@ -13,6 +13,8 @@ const GOAL_RADIUS := 85.0
 const ROAD_PREVIEW_DISTANCES := [60.0, 120.0, 240.0, 400.0]
 const OBSERVATION_SIZE := 31
 const DEFAULT_AI_CHECKPOINT := 1
+const ORIGINAL_GENERATOR_TRAFFIC_COUNT := 8
+const SEGMENTED_GENERATOR_TRAFFIC_COUNT := 20
 const POLICY_MODEL_PATHS := {
 	1: "res://ai/models/setup2_network_routes_ppo_v1_best.zip",
 	2: "res://ai/models/checkpoints/setup2_network_routes_ppo_v1_276480_steps.zip"
@@ -28,6 +30,7 @@ const POLICY_SERVER_PATH := "res://ai/live_policy_server.py"
 @onready var minimap_view: Control = $Minimap/View
 @onready var ai_mode_hud: CanvasLayer = $AiModeHud
 @onready var game_over: CanvasLayer = $GameOver
+@onready var settings_popup: CanvasLayer = $SettingsPopup
 
 var goal_marker: Node2D
 var ai_mode_active := false
@@ -62,6 +65,7 @@ var saved_manual_speed := 0.0
 var saved_manual_steering := 0.0
 var saved_manual_crashed := false
 var saved_debug_camera_mode := false
+var environment_ready := false
 
 
 func _ready() -> void:
@@ -70,11 +74,20 @@ func _ready() -> void:
 	goal_marker.set_script(load("res://scripts/goal_marker.gd"))
 	goal_marker.z_index = 20
 	add_child(goal_marker)
-	ai_mode_hud.call("set_target_distance", ai_target_distance)
 	ai_mode_hud.call("set_checkpoint_label", _selected_checkpoint_label())
-	ai_mode_hud.connect("target_distance_changed", _on_ai_target_distance_changed)
-	place_ego()
+	settings_popup.call("set_target_distance", ai_target_distance)
+	settings_popup.call("set_checkpoint_label", _selected_checkpoint_label())
+	settings_popup.connect("generate_requested", _on_environment_generate_requested)
+	settings_popup.connect("quick_generate_requested", _on_quick_generate_requested)
+	settings_popup.connect("checkpoint_requested", select_ai_checkpoint)
+	settings_popup.connect("target_distance_changed", _on_ai_target_distance_changed)
+	settings_popup.connect("popup_visibility_changed", _on_settings_visibility_changed)
 	road_generator.road_regenerated.connect(_on_road_regenerated)
+	environment_ready = road_generator.get_route() != null and road_generator.get_route().is_valid()
+	if environment_ready:
+		place_ego()
+	else:
+		get_tree().paused = true
 	_update_mode_hud()
 
 
@@ -132,14 +145,27 @@ func _physics_process(_delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if settings_popup != null and bool(settings_popup.get("popup_open")):
+		return
+	if not environment_ready:
+		return
 	var key := event as InputEventKey
 	if key == null or not key.pressed or key.echo:
 		return
-	if key.keycode == KEY_1 or key.physical_keycode == KEY_1:
+	if key.keycode == KEY_C or key.physical_keycode == KEY_C:
+		debug_camera.call("toggle_camera")
+		get_viewport().set_input_as_handled()
+	elif key.keycode == KEY_1 or key.physical_keycode == KEY_1:
 		select_ai_checkpoint(1)
 		get_viewport().set_input_as_handled()
 	elif key.keycode == KEY_2 or key.physical_keycode == KEY_2:
 		select_ai_checkpoint(2)
+		get_viewport().set_input_as_handled()
+	elif bool(debug_camera.get("debug_mode")) and (key.keycode == KEY_I or key.physical_keycode == KEY_I):
+		debug_camera.call("adjust_zoom", float(debug_camera.get("zoom_step")))
+		get_viewport().set_input_as_handled()
+	elif bool(debug_camera.get("debug_mode")) and (key.keycode == KEY_O or key.physical_keycode == KEY_O):
+		debug_camera.call("adjust_zoom", -float(debug_camera.get("zoom_step")))
 		get_viewport().set_input_as_handled()
 	elif key.keycode == KEY_I or key.physical_keycode == KEY_I:
 		toggle_ai_mode()
@@ -159,9 +185,13 @@ func toggle_ai_mode() -> void:
 func select_ai_checkpoint(checkpoint_id: int) -> void:
 	if not POLICY_MODEL_PATHS.has(checkpoint_id):
 		return
+	if not environment_ready:
+		settings_popup.call("set_status", "Generate a map before starting the AI drive.")
+		return
 	var checkpoint_changed := selected_ai_checkpoint != checkpoint_id
 	selected_ai_checkpoint = checkpoint_id
 	ai_mode_hud.call("set_checkpoint_label", _selected_checkpoint_label())
+	settings_popup.call("set_checkpoint_label", _selected_checkpoint_label())
 	if not ai_mode_active:
 		_enter_ai_mode()
 		return
@@ -189,6 +219,11 @@ func select_ai_checkpoint(checkpoint_id: int) -> void:
 
 
 func _enter_ai_mode() -> void:
+	if not environment_ready:
+		ai_status = "Generate a map before starting the AI drive."
+		settings_popup.call("set_status", ai_status)
+		_update_mode_hud()
+		return
 	var model_path := _selected_policy_model_path()
 	if not FileAccess.file_exists(model_path):
 		ai_status = "AI model not found: %s" % model_path
@@ -265,13 +300,91 @@ func _save_manual_state() -> void:
 
 func _set_dynamic_actors_enabled(enabled: bool) -> void:
 	if enabled:
-		traffic_manager.call("set_traffic_enabled", true)
 		traffic_light_manager.call("set_lights_enabled", true)
 		pedestrian_manager.call("set_pedestrians_enabled", true)
+		traffic_manager.call("set_traffic_enabled", true)
 	else:
 		traffic_manager.call("set_traffic_enabled", false)
-		traffic_light_manager.call("set_lights_enabled", false)
 		pedestrian_manager.call("set_pedestrians_enabled", false)
+		traffic_light_manager.call("set_lights_enabled", false)
+
+
+func _on_quick_generate_requested() -> void:
+	if environment_ready:
+		_on_environment_generate_requested(
+			0, true, int(road_generator.call("get_generator_type"))
+		)
+
+
+func _on_environment_generate_requested(
+	requested_seed: int,
+	randomize_seed: bool,
+	generator_type: int
+) -> void:
+	var chosen_seed := requested_seed
+	if randomize_seed:
+		var seed_rng := RandomNumberGenerator.new()
+		seed_rng.randomize()
+		chosen_seed = seed_rng.randi_range(1, 2147483646)
+		if chosen_seed == int(road_generator.get("seed_value")):
+			chosen_seed = 1 if chosen_seed == 2147483646 else chosen_seed + 1
+	if chosen_seed <= 0:
+		settings_popup.call("set_status", "Use a positive seed so this map can be reproduced.")
+		return
+
+	road_generator.call("set_generator_type", generator_type)
+	var is_segmented_generation := bool(road_generator.call("uses_segmented_generation"))
+	traffic_manager.set(
+		"number_of_cars",
+		SEGMENTED_GENERATOR_TRAFFIC_COUNT
+		if is_segmented_generation
+		else ORIGINAL_GENERATOR_TRAFFIC_COUNT
+	)
+	var generator_label: String = road_generator.call("get_generator_label")
+	settings_popup.call("set_status", "Building %s…" % generator_label)
+	_set_dynamic_actors_enabled(false)
+	game_over.visible = false
+	if not ai_mode_active:
+		ego_vehicle.reset_vehicle()
+	road_generator.set("enable_hotkeys", false)
+	traffic_manager.set("randomize_seed", false)
+	traffic_manager.set("seed_value", posmod(chosen_seed + 196613, 2147483647))
+	traffic_light_manager.set("seed_value", posmod(chosen_seed + 104729, 2147483647))
+	pedestrian_manager.set("seed_value", posmod(chosen_seed + 130363, 2147483647))
+	road_generator.call("generate_with_seed", chosen_seed)
+	var route: RoutePath = road_generator.get_route()
+	var route_length := route.length if route != null else 0.0
+	if route == null or not route.is_valid():
+		environment_ready = false
+		settings_popup.call("set_map_generated", false)
+		settings_popup.call("set_popup_open", true)
+		get_tree().paused = true
+		settings_popup.call("set_status", "This seed did not produce a valid road (%.0f units). Try another seed." % route_length)
+		return
+	if ai_mode_active:
+		# The old manual pose belongs to the previous map. Leaving AI mode must
+		# restore the player at a valid spawn on this newly generated one.
+		var manual_spawn: Dictionary = traffic_manager.get_ego_spawn_pose()
+		saved_manual_position = manual_spawn["position"]
+		saved_manual_rotation = manual_spawn["rotation"]
+		saved_manual_speed = 0.0
+		saved_manual_steering = 0.0
+		saved_manual_crashed = false
+	_set_dynamic_actors_enabled(not ai_mode_active)
+	settings_popup.call("set_map_generated", true, chosen_seed, generator_label)
+	get_tree().paused = false
+	if ai_mode_active:
+		ai_status = "Map regenerated. AI goal replanned."
+		_update_mode_hud()
+
+
+func _on_settings_visibility_changed(is_open: bool) -> void:
+	if is_open:
+		get_tree().paused = true
+	elif environment_ready:
+		get_tree().paused = false
+	else:
+		get_tree().paused = true
 
 
 func _begin_ai_goal() -> void:
@@ -583,6 +696,8 @@ func _ai_driving_status() -> String:
 
 
 func _minimum_turns_for_target_distance(distance: float) -> int:
+	if int(road_generator.call("get_generator_type")) == 1:
+		return 1 if distance >= 800.0 else 0
 	if distance >= 4200.0:
 		return 4
 	if distance >= 2700.0:
@@ -610,6 +725,8 @@ func _update_mode_hud() -> void:
 
 
 func _on_road_regenerated() -> void:
+	environment_ready = road_generator.get_route() != null \
+		and road_generator.get_route().is_valid()
 	if ai_mode_active:
 		_begin_ai_goal()
 	else:
@@ -635,6 +752,9 @@ func place_ego() -> void:
 
 
 func restart_simulation() -> void:
+	if not environment_ready:
+		settings_popup.call("set_status", "Generate a map before starting a drive.")
+		return
 	if ai_mode_active:
 		if get_tree().paused:
 			get_tree().paused = false

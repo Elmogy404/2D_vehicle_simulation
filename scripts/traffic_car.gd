@@ -10,8 +10,6 @@ extends CharacterBody2D
 @export var acceleration: float = 100.0
 @export var braking: float = 300.0
 
-@export var max_steering_speed: float = 5.0
-
 
 # ============================================================
 # FOLLOWING
@@ -50,18 +48,14 @@ extends CharacterBody2D
 
 @export_category("Lane Keeping")
 
-@export var lookahead_time: float = 0.35
-@export var minimum_lookahead: float = 60.0
-@export var maximum_lookahead: float = 220.0
-
 ## Heading change over the probe distance that triggers the
 ## strongest curve slowdown.
-@export var max_curve_angle: float = 0.6
+@export var max_curve_angle: float = 0.45
 
 ## Speed ratio kept on the sharpest allowed curve.
-@export var curve_speed_factor: float = 0.45
+@export var curve_speed_factor: float = 0.35
 
-@export var curve_probe_distance: float = 150.0
+@export var curve_probe_distance: float = 240.0
 
 
 # ============================================================
@@ -105,6 +99,8 @@ var lane_change_to: int = 0
 var lane_change_elapsed: float = 0.0
 var merge_signal_active: bool = false
 var signal_lights: Array[Line2D] = []
+var trip_end_node: int = -1
+var trip_previous_node: int = -1
 
 
 # ============================================================
@@ -147,6 +143,25 @@ func setup(
 		route.length if route != null else 0.0
 	)
 
+	snap_to_route()
+
+
+func assign_trip(
+	new_route: RoutePath,
+	new_lane_index: int,
+	new_end_node: int,
+	new_previous_node: int
+) -> void:
+	if new_route == null or not new_route.is_valid():
+		return
+	route = new_route
+	travel_direction = 1.0
+	lane_index = clampi(new_lane_index, 0, route.get_lane_count_at(0.0) - 1)
+	lane_change_active = false
+	merge_signal_active = false
+	progress = minf(vehicle_length * 0.5, route.length * 0.02)
+	trip_end_node = new_end_node
+	trip_previous_node = new_previous_node
 	snap_to_route()
 
 
@@ -218,11 +233,7 @@ func _physics_process(delta: float) -> void:
 			)
 		)
 
-	if not reentry_clear():
-		target_speed = minf(
-			target_speed,
-			stop_before_route_end_speed()
-		)
+	target_speed = minf(target_speed, stop_before_route_end_speed())
 
 	target_speed = minf(target_speed, traffic_light_speed_limit())
 	target_speed = minf(target_speed, merge_speed_limit())
@@ -258,66 +269,17 @@ func _physics_process(delta: float) -> void:
 
 	handle_route_end()
 
-	# --------------------------------------------------------
-	# Lane keeping: steer toward a point ahead on the lane
-	# --------------------------------------------------------
-
-	var look: float = clampf(
-		speed * lookahead_time,
-		minimum_lookahead,
-		maximum_lookahead
-	)
-
-	var target_distance: float = progress + travel_direction * look
-
-	# Never aim beyond the exit while waiting for re-entry.
-	if not reentry_clear():
-		var exit: float = exit_progress()
-
-		if travel_direction > 0.0:
-			target_distance = minf(target_distance, exit)
-
-		else:
-			target_distance = maxf(target_distance, exit)
-
-	var target_lane_offset := _lane_offset_at(target_distance)
-	var target_point: Vector2 = route.get_position_at(
-		target_distance,
-		target_lane_offset
-	)
-
-	var to_target: Vector2 = target_point - global_position
-
-	if to_target.length_squared() < 0.01:
-		velocity = Vector2.ZERO
-		return
-
-
-	var direction: Vector2 = to_target.normalized()
-
-	var desired_rotation: float = (
-		direction.angle()
-		+
-		PI / 2.0
-	)
-
-	rotation = lerp_angle(
-		rotation,
-		desired_rotation,
-		minf(max_steering_speed * delta, 1.0)
-	)
-
-	velocity = direction * speed
-
-	move_and_slide()
-
-	# A physical contact must remove forward drive immediately. This prevents
-	# NPCs from continuously pushing another car or vibrating against a wall.
-	if get_slide_collision_count() > 0:
-		speed = 0.0
-
-	sync_progress()
+	# NPCs follow their assigned lane spline kinematically. The previous
+	# move-and-slide/pursuit controller cut corners with the long car collider;
+	# it could wedge against curb segments and freeze traffic indefinitely.
+	# Route geometry is the authoritative drivable corridor, while traffic,
+	# signals and active crossings constrain speed above.
 	lane_offset = _lane_offset_at(progress)
+	global_position = route.get_position_at(progress, lane_offset)
+	rotation = (
+		route.get_direction_at(progress) * travel_direction
+	).angle() + PI / 2.0
+	velocity = Vector2.UP.rotated(rotation) * speed
 	_update_turn_signal_visuals()
 
 
@@ -386,22 +348,27 @@ func can_merge_into(target_lane: int) -> bool:
 	for other in get_tree().get_nodes_in_group("traffic"):
 		if not is_instance_valid(other) or other == self:
 			continue
-
-		if other.get("route") != route:
+		var near: Dictionary = route.nearest(
+			other.global_position, progress, merge_lookahead + vehicle_length
+		)
+		if float(near["distance"]) > route.get_half_width_at(float(near["progress"])) \
+		+ float(other.get("vehicle_width")) * 0.5:
 			continue
-
-		if float(other.get("travel_direction")) != travel_direction:
+		var other_heading := Vector2.UP.rotated(other.global_rotation)
+		var own_heading := route.get_direction_at(progress) * travel_direction
+		if own_heading.dot(other_heading) < 0.55:
 			continue
-
-		var other_lane: int = int(other.get("lane_index"))
-
-		if bool(other.get("lane_change_active")):
-			other_lane = int(other.get("lane_change_to"))
-
-		if other_lane != target_lane:
+		var other_progress := float(near["progress"])
+		var route_center := route.get_position_at(other_progress)
+		var lateral_offset: float = (other.global_position - route_center).dot(
+			route.get_normal_at(other_progress)
+		)
+		var target_offset := route.get_lane_offset_at(
+			other_progress, target_lane, travel_direction
+		)
+		if absf(lateral_offset - target_offset) > lane_match_distance:
 			continue
-
-		var gap := (float(other.get("progress")) - progress) * travel_direction
+		var gap := (other_progress - progress) * travel_direction
 
 		if gap >= 0.0 and gap < merge_ahead_clearance:
 			return false
@@ -539,20 +506,16 @@ func handle_route_end() -> void:
 	var exit: float = exit_progress()
 
 	if travel_direction > 0.0 and progress >= exit:
-		if reentry_clear():
-			progress = entry_progress()
-			snap_to_route()
-
-		else:
-			progress = exit
+		progress = exit
+		var manager := get_parent()
+		if manager != null and manager.has_method("assign_next_trip") \
+		and manager.call("assign_next_trip", self, trip_end_node, trip_previous_node):
+			return
+		speed = 0.0
 
 	elif travel_direction < 0.0 and progress <= exit:
-		if reentry_clear():
-			progress = entry_progress()
-			snap_to_route()
-
-		else:
-			progress = exit
+		progress = exit
+		speed = 0.0
 
 
 # True when no same-lane vehicle (including the ego) occupies
@@ -647,14 +610,35 @@ func follow_speed(gap: float, leader_speed: float = 0.0) -> float:
 func traffic_light_speed_limit() -> float:
 	var nearest_gap: float = INF
 	var nearest_light: Node
+	var nearest_approach_heading := Vector2.ZERO
+	var route_search_distance := detection_distance + 500.0
+	var route_offset := global_position.distance_to(route.get_position_at(progress))
 
 	for candidate in get_tree().get_nodes_in_group("traffic_lights"):
 		var light := candidate as Node
-
-		if light == null or light.route != route:
+		if light == null or not light.has_method("requires_stop_for_heading"):
 			continue
-
-		var stop_progress: float = light.stop_progress_for(travel_direction)
+		var intersection_width := float(light.get("intersection_width"))
+		var light_radius := maxf(intersection_width * 0.65, 105.0)
+		# nearest() searches whole segments intersecting its progress window.
+		# A long segment can extend past that window, so include the longest
+		# segment as well as the car's actual offset from the centerline.
+		var search_reach := route_search_distance + route.max_segment_length \
+			+ route_offset + light_radius
+		if global_position.distance_squared_to(light.global_position) > search_reach * search_reach:
+			continue
+		var near: Dictionary = route.nearest(
+			light.global_position, progress, route_search_distance
+		)
+		if float(near["distance"]) > light_radius:
+			continue
+		var light_progress := float(near["progress"])
+		var stop_offset := intersection_width * 0.5 + 18.0
+		var stop_progress := clampf(
+			light_progress - travel_direction * stop_offset,
+			0.0,
+			route.length
+		)
 		var center_gap: float = (
 			(stop_progress - progress) * travel_direction
 		)
@@ -663,11 +647,14 @@ func traffic_light_speed_limit() -> float:
 		if bumper_gap >= 0.0 and bumper_gap < nearest_gap:
 			nearest_gap = bumper_gap
 			nearest_light = light
+			nearest_approach_heading = route.get_direction_at(light_progress) * travel_direction
 
 	if nearest_light == null:
 		return cruise_speed
 
-	if not nearest_light.requires_stop(speed, nearest_gap, braking):
+	if not nearest_light.requires_stop_for_heading(
+		nearest_approach_heading, speed, nearest_gap, braking
+	):
 		return cruise_speed
 
 	if nearest_gap <= safe_distance:
@@ -699,31 +686,15 @@ func leader_state() -> Dictionary:
 	for other in get_tree().get_nodes_in_group("traffic"):
 		if not is_instance_valid(other) or other == self:
 			continue
-
-		if other.get("route") != route:
+		if _has_crossing_right_of_way_over(other):
 			continue
-
-		if float(other.get("travel_direction")) != travel_direction:
-			continue
-
-		var other_offset: float = float(other.call(
-			"_lane_offset_at",
-			float(other.get("progress"))
-		))
-		var own_offset: float = _lane_offset_at(float(other.get("progress")))
-
-		if absf(other_offset - own_offset) > lane_match_distance:
-			continue
-
-		var center_gap: float = (
-			(float(other.get("progress")) - progress)
-			*
-			travel_direction
+		var gap := _world_gap_to_body(
+			other.global_position,
+			other.global_rotation,
+			float(other.get("vehicle_width")),
+			float(other.get("vehicle_length"))
 		)
-		var other_length: float = float(other.get("vehicle_length"))
-		var gap: float = center_gap - (vehicle_length + other_length) * 0.5
-
-		if center_gap <= 0.0 or gap >= best_gap:
+		if gap >= best_gap:
 			continue
 
 		best_gap = gap
@@ -736,23 +707,26 @@ func leader_state() -> Dictionary:
 	)
 
 	if ego != null and is_instance_valid(ego):
-		var ego_gap: float = gap_to_position(
-			ego.global_position
+		var ego_gap := _world_gap_to_body(
+			ego.global_position,
+			ego.global_rotation,
+			float(ego.get("vehicle_width")),
+			float(ego.get("vehicle_length"))
 		)
 
 		if ego_gap < best_gap:
 			best_gap = ego_gap
 			best_speed = float(ego.get("current_speed"))
 
-	for pedestrian in get_tree().get_nodes_in_group("pedestrians"):
+	for pedestrian in get_tree().get_nodes_in_group("crossing_pedestrians"):
 		if not is_instance_valid(pedestrian):
 			continue
-		# Pedestrians waiting at the curb are deliberately outside the roadway.
-		# Only an active crossing should act as a longitudinal lane obstacle.
-		if not bool(pedestrian.get("is_crossing")):
-			continue
-
-		var pedestrian_gap: float = gap_to_position(pedestrian.global_position)
+		var pedestrian_gap := _world_gap_to_body(
+			pedestrian.global_position,
+			pedestrian.global_rotation,
+			140.0,
+			24.0
+		)
 
 		if pedestrian_gap < best_gap:
 			best_gap = pedestrian_gap
@@ -761,39 +735,67 @@ func leader_state() -> Dictionary:
 	return {"gap": best_gap, "speed": best_speed}
 
 
+## A stopped crossing car should yield to a continuing/wider road instead of
+## making both approaches wait forever. Signals still control the yielding car;
+## this only removes an unsignalized perpendicular vehicle from its leader scan.
+func _has_crossing_right_of_way_over(other: Node) -> bool:
+	var own_forward := Vector2.UP.rotated(global_rotation)
+	var other_forward := Vector2.UP.rotated(other.global_rotation)
+	if absf(own_forward.dot(other_forward)) >= 0.22:
+		return false
+
+	var own_width := route.get_half_width_at(progress) * 2.0
+	var other_width := float(other.get("vehicle_width"))
+	var other_route := other.get("route") as RoutePath
+	if other_route != null and other_route.is_valid():
+		other_width = other_route.get_half_width_at(float(other.get("progress"))) * 2.0
+	if own_width > other_width + 12.0:
+		return true
+	if other_width > own_width + 12.0:
+		return false
+
+	# Equal-width approaches cannot both yield. Pick the same direction-independent
+	# axis winner on both cars so a pair always has exactly one vehicle proceed.
+	var own_axis := fposmod(own_forward.angle(), PI)
+	var other_axis := fposmod(other_forward.angle(), PI)
+	if not is_equal_approx(own_axis, other_axis):
+		return own_axis < other_axis
+	return get_instance_id() < other.get_instance_id()
+
+
 func gap_to_position(position: Vector2) -> float:
 	if route == null or not route.is_valid():
 		return INF
+	return _world_gap_to_body(position, 0.0, 62.0, 122.0)
 
-	var near: Dictionary = route.nearest(position)
 
-	var other_progress: float = float(near["progress"])
-
-	# Only when the other vehicle really shares this lane.
-	var lane_center: Vector2 = route.get_position_at(
-		other_progress,
-		lane_offset
-	)
-
-	if lane_center.distance_to(position) > lane_match_distance:
+func _world_gap_to_body(
+	position: Vector2,
+	body_rotation: float,
+	body_width: float,
+	body_length: float
+) -> float:
+	var forward := Vector2.UP.rotated(global_rotation)
+	var delta := position - global_position
+	var along := delta.dot(forward)
+	if along <= 0.0 or along > detection_distance:
 		return INF
-
-	var center_gap: float = (
-		(other_progress - progress)
-		*
-		travel_direction
+	var lateral_axis := forward.rotated(-PI * 0.5)
+	var lateral := absf(delta.dot(lateral_axis))
+	var maximum_lateral := maxf(
+		lane_match_distance,
+		(vehicle_width + body_width) * 0.5 + 18.0
 	)
-
-	if center_gap <= 0.0:
+	if lateral > maximum_lateral:
 		return INF
-
-	var other_length: float = 122.0
-	var ego: Node = get_tree().get_first_node_in_group("vehicle_obstacle")
-
-	if ego != null and ego.has_method("get_speed_kmh"):
-		other_length = float(ego.get("vehicle_length"))
-
-	return center_gap - (vehicle_length + other_length) * 0.5
+	var other_forward := Vector2.UP.rotated(body_rotation)
+	if other_forward.length_squared() > 0.5 \
+	and absf(forward.dot(other_forward)) < 0.22:
+		# Crossing traffic is still an obstacle when it occupies our narrow
+		# forward corridor; otherwise perpendicular approaches remain independent.
+		if lateral > maximum_lateral * 0.72:
+			return INF
+	return along - (vehicle_length + body_length) * 0.5
 
 
 # All route progress values of vehicles sharing this lane

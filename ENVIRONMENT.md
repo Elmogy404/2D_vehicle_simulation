@@ -1,9 +1,9 @@
 # Driving Environment Foundation
 
 The simulation deliberately keeps driving policy separate from vehicle physics.
-The playable main scene has no automatic driving policy. A separate initial PPO
-training setup is documented in `ai/README.md`; the staged AI plan is in
-`AI_ROADMAP.md`.
+The playable main scene supports manual driving and an optional live PPO
+checkpoint viewer. PPO training runs in a separate Godot world; its setup is
+documented in `ai/README.md`, and the staged plan is in `AI_ROADMAP.md`.
 
 ## Control contract
 
@@ -36,12 +36,23 @@ physics implementation.
 - crash state
 - normalized distance sensor readings
 
-This service does not apply controls or change simulation state.
+This service does not apply controls or change simulation state. It is retained
+as a telemetry interface, although the current HUD and live PPO controller
+read their inputs directly rather than calling it.
 
 ## Generated world systems
 
+The startup settings select either the original procedural network (described
+below) or a 200-piece segmented city built from authored road pieces. Both
+connect to the same gameplay systems. The current segmented planner uses two-
+and four-lane streets; its six-lane and centered-crosswalk pieces remain in
+the asset catalog but are not placed in generated maps yet.
+
 - The ego camera follows the player by default with physics-tick smoothing.
   Press `C` to switch to the free debug camera.
+- Press `F` during a drive (or after a crash) to regenerate the selected road
+  type with a new seed. The settings gear remains available, and the last seed
+  appears in the map notice and seed field so the layout can be reproduced.
 - The main road uses a seeded profile ranging from one to three lanes per
   direction. Width, lane centers, and divider markings share the same smooth
   transition data, producing finite tapered lane additions and merges separated
@@ -52,7 +63,7 @@ This service does not apply controls or change simulation state.
   map still guarantees at least one T-junction, four-way intersection, curved
   section, roundabout, and alternate route.
 - Every road is represented by one connected `RoadNetwork`, including
-  shortest-path lookup for the later destination-routing phase. Identical seeds
+  shortest-path lookup for AI destination routing. Identical seeds
   reproduce the complete topology for debugging; different seeds do not reuse
   one fixed street template.
 - The generated district uses a variable hierarchy: a gently curving multi-lane
@@ -98,14 +109,14 @@ This service does not apply controls or change simulation state.
 
 1. `World`: road boundaries and static geometry
 2. `Vehicles`: ego and traffic vehicles
-3. `Pedestrians`: reserved for the pedestrian phase
+3. `Pedestrians`: pedestrian actors
 4. `Triggers`: reserved for signals, checkpoints, and scenario events
 
 ## Current boundary
 
-This milestone includes deterministic mixed-road geometry, signals,
+The current simulation includes deterministic mixed-road geometry, signals,
 pedestrians, priority merges, reverse driving, exploration UI, and a connected
-navigation graph with actual alternate road loops. Current NPC traffic follows
-the arterial; a future traffic-routing phase can assign destinations across the
-existing graph. Weather/surface conditions and training systems remain separate
-phases.
+navigation graph with alternate road loops. PPO training and live checkpoint
+viewing exist, but training still uses the original empty-road world; NPC and
+signal-aware training are future work. Weather and surface conditions are not
+implemented.
