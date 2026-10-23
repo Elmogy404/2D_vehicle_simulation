@@ -1,5 +1,40 @@
 # PPO driving setups
 
+Environment version 2 fixes the driving reference geometry and simulation
+stepping. Start a **new training run** after updating; old checkpoints remain
+available for inspection but cannot be resumed into version 2. The default CLI
+run name is `setup2_network_routes_ppo_v2`.
+
+Training now builds rounded, car-feasible driving paths from the street graph,
+keeps heading changes local, and adjusts lane position for body clearance and
+wide turns. Every accepted trip is checked against the actual world colliders
+at five-unit intervals, with extra clearance at spawn and goal. The current
+125-unit roundabout reference is below the car's 131-unit minimum turning
+radius, so training excludes those ring edges; all eight distance tiers and
+their required turn counts remain enforced.
+
+Each action advances exactly four completed vehicle physics ticks. The car
+does not move while Python is thinking or training is paused. Destination
+success also requires route progress, and turns are counted only when they
+can be completed before the goal's success radius. Progress reward is paid
+once per newly reached distance; 150 steps without two units of new progress
+end a stalled episode. Route previews stop at the actual goal.
+
+Invalid trips trigger a bounded, deterministic search for another map. Reset
+information records the requested seed, actual map seed, and map attempts.
+If this search still fails, unseeded training retries a bounded set of episode
+seeds; explicitly seeded evaluation reports the failure. Curriculum stage,
+recent outcomes, and each worker's random generator state are stored in policy
+checkpoints. Resume starts new episodes with those states and requires the
+original worker count. Best-model scores survive resume, and unexpected
+training failures save a separate recovery policy without replacing the last
+completed model.
+
+Run the extended environment checks with Godot's `--headless --path . --script
+res://tests/ai_environment_test.gd` (add `-- --held-out` for a separate seed
+range), and Python checks with `python -m unittest discover -s tests -p
+"test_*.py"`.
+
 Setup 1 proved basic empty-road lane following. Setup 2 now trains an empty-road
 policy to follow planned trips through the connected district street graph,
 including intersections, turns, changing widths, and 4,200–5,500-unit routes.
@@ -38,9 +73,9 @@ python -m pip install -r ai/requirements.txt
 $env:GODOT_BIN = "C:\path\to\Godot_v4_console.exe"
 python ai/smoke_test.py
 python ai/train.py --n-envs 6
-python ai/evaluate.py --model ai/models/setup2_network_routes_ppo_v1_best.zip --episodes 50 --seed 20000 --curriculum-stage 7
-python ai/evaluate.py --model ai/models/setup2_network_routes_ppo_v1_best.zip --episodes 50 --seed 21000 --curriculum-stage 7 --visible
-python ai/watch_policy.py --model ai/models/setup2_network_routes_ppo_v1_best.zip --curriculum-stage 7
+python ai/evaluate.py --model ai/models/setup2_network_routes_ppo_v2_best.zip --episodes 50 --seed 20000 --curriculum-stage 7
+python ai/evaluate.py --model ai/models/setup2_network_routes_ppo_v2_best.zip --episodes 50 --seed 21000 --curriculum-stage 7 --visible
+python ai/watch_policy.py --model ai/models/setup2_network_routes_ppo_v2_best.zip --curriculum-stage 7
 ```
 
 The default training cap is 1,000,000 timesteps. The route-distance curriculum

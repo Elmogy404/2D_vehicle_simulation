@@ -9,7 +9,7 @@ import json
 import math
 from pathlib import Path
 
-from godot_gym_env import GodotRoadEnv
+from godot_gym_env import ENVIRONMENT_VERSION, GodotRoadEnv
 from training_control import TrainingControl, parse_reward_config
 
 
@@ -43,6 +43,26 @@ def make_training_env(godot_executable: str | None, reward_config: dict[str, flo
     return Monitor(GodotRoadEnv(godot_executable, reward_config=reward_config))
 
 
+def capture_training_state(model: object) -> None:
+    """Store worker curriculum and RNG alongside the policy in every ZIP."""
+    model.training_environment_state = {
+        "version": ENVIRONMENT_VERSION,
+        "workers": model.get_env().env_method("get_training_state"),
+    }
+
+
+def restore_training_state(model: object) -> None:
+    snapshot = getattr(model, "training_environment_state", None)
+    if not snapshot or snapshot.get("version") != ENVIRONMENT_VERSION:
+        raise ValueError("Checkpoint uses the old training environment; start a fresh run after the environment fixes.")
+    env = model.get_env()
+    workers = snapshot["workers"]
+    if len(workers) != env.num_envs:
+        raise ValueError("Resume with the original worker count to preserve each worker's curriculum.")
+    for index, state in enumerate(workers):
+        env.env_method("set_training_state", state, indices=index)
+
+
 def main() -> None:
     # Keep torch/SB3 out of spawned worker imports to limit per-worker memory.
     from stable_baselines3 import PPO
@@ -60,7 +80,7 @@ def main() -> None:
     parser.add_argument("--checkpoint-every", type=int, default=10_240)
     parser.add_argument(
         "--run-name",
-        default="setup2_network_routes_ppo_v1",
+        default="setup2_network_routes_ppo_v2",
         help="Versioned basename for this run's model/checkpoints (without extension)",
     )
     parser.add_argument("--eval-every", type=int, default=50_000)
@@ -141,6 +161,9 @@ def main() -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = model_dir / f"{arguments.run_name}_training_config.json"
     manifest = {
+        "environment_version": ENVIRONMENT_VERSION,
+        "workers": arguments.n_envs,
+        "evaluation": {"seed": arguments.eval_seed, "episodes": arguments.eval_episodes, "threshold": arguments.success_threshold},
         "reward_config": reward_config,
         "learning_rate": arguments.learning_rate,
         "batch_size": arguments.batch_size,
@@ -151,7 +174,7 @@ def main() -> None:
         previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if previous_manifest != manifest:
             parser.error(
-                "resume settings differ from this run's saved reward/PPO settings; "
+                "resume settings or environment version differ from this run's saved settings; "
                 "keep the original values or start a new run"
             )
     elif arguments.resume:
@@ -191,6 +214,7 @@ def main() -> None:
     try:
         if arguments.resume:
             model = load_sb3_checkpoint(arguments.resume, env)
+            restore_training_state(model)
             remaining_steps = arguments.steps - model.num_timesteps
             if remaining_steps <= 0:
                 parser.error(
@@ -217,23 +241,28 @@ def main() -> None:
             )
             remaining_steps = arguments.steps
 
-        callbacks = [
-            CheckpointCallback(
-                save_freq=max(1, arguments.checkpoint_every // arguments.n_envs),
-                save_path=str(checkpoint_dir),
-                name_prefix=arguments.run_name,
-                verbose=1,
-            )
-        ]
+        class StatefulCheckpointCallback(CheckpointCallback):
+            def _on_step(self) -> bool:
+                if self.n_calls % self.save_freq == 0:
+                    capture_training_state(self.model)
+                return super()._on_step()
+
+        checkpoint_callback = StatefulCheckpointCallback(
+            save_freq=max(1, arguments.checkpoint_every // arguments.n_envs),
+            save_path=str(checkpoint_dir),
+            name_prefix=arguments.run_name,
+            verbose=1,
+        )
 
         class GuiControlCallback(BaseCallback):
             def _on_training_start(self) -> None:
+                capture_training_state(self.model)
                 control.write_status("running", self.num_timesteps, "Training in progress")
 
             def _on_step(self) -> bool:
                 return control.poll(self.num_timesteps)
 
-        callbacks.append(GuiControlCallback())
+        callbacks = [GuiControlCallback()]
 
         if arguments.eval_every > 0:
             evaluation_env = make_training_env(arguments.godot, reward_config)
@@ -249,6 +278,16 @@ def main() -> None:
                     self.can_early_stop = arguments.eval_episodes >= 8
                     self.best_path = model_dir / f"{arguments.run_name}_best"
                     self.csv_path = runs_dir / f"{arguments.run_name}_success_eval.csv"
+                    self.score_path = model_dir / f"{arguments.run_name}_best_score.json"
+                    if arguments.resume and self.score_path.exists():
+                        previous = json.loads(self.score_path.read_text(encoding="utf-8"))
+                        if previous.get("environment_version") == ENVIRONMENT_VERSION:
+                            self.best_score = tuple(previous["score"])
+                    resumed_evaluation = getattr(model, "training_evaluation_state", {})
+                    resumed_best = resumed_evaluation.get("best_score")
+                    if resumed_best is not None:
+                        self.best_score = max(self.best_score or tuple(resumed_best), tuple(resumed_best))
+                    self.early_stop_streak = int(resumed_evaluation.get("early_stop_streak", 0))
                     if not self.csv_path.exists():
                         with self.csv_path.open("w", newline="", encoding="utf-8") as csv_file:
                             csv.writer(csv_file).writerow(
@@ -377,7 +416,6 @@ def main() -> None:
                     save_best = self.best_score is None or score > self.best_score
                     if save_best:
                         self.best_score = score
-                        self.model.save(self.best_path)
 
                     overall_gate_met = success_rate >= arguments.success_threshold
                     longest_route_gate_met = (
@@ -387,6 +425,16 @@ def main() -> None:
                     gate_met = overall_gate_met and longest_route_gate_met
                     if arguments.early_stop_patience > 0 and self.can_early_stop:
                         self.early_stop_streak = self.early_stop_streak + 1 if gate_met else 0
+                    self.model.training_evaluation_state = {
+                        "best_score": self.best_score,
+                        "early_stop_streak": self.early_stop_streak,
+                    }
+                    if save_best:
+                        capture_training_state(self.model)
+                        self.model.save(self.best_path)
+                        temporary_score = self.score_path.with_suffix(".tmp")
+                        temporary_score.write_text(json.dumps({"environment_version": ENVIRONMENT_VERSION, "score": score}), encoding="utf-8")
+                        temporary_score.replace(self.score_path)
                     print(
                         "SUCCESS EVAL steps=%d episodes=%d stages=%s success=%.1f%% "
                         "crash=%.1f%% off_road=%.1f%% mean_steps=%.1f turns=%.2f "
@@ -455,6 +503,7 @@ def main() -> None:
 
             callbacks.append(SuccessRateEvalCallback())
 
+        callbacks.append(checkpoint_callback)
         callback = CallbackList(callbacks)
         model.learn(
             total_timesteps=remaining_steps,
@@ -464,6 +513,7 @@ def main() -> None:
         )
         output = model_dir / arguments.run_name
         control.write_status("saving", model.num_timesteps, "Saving the latest PPO model")
+        capture_training_state(model)
         model.save(output)
         print(f"Saved PPO policy to {output}.zip")
         control.write_status(
@@ -471,8 +521,18 @@ def main() -> None:
             model.num_timesteps,
             f"Model saved to {output}.zip",
         )
-    except Exception as error:
-        control.write_status("failed", model.num_timesteps if "model" in locals() else 0, str(error))
+    except (Exception, KeyboardInterrupt) as error:
+        recovery_note = ""
+        if "model" in locals():
+            try:
+                # A failed subprocess may no longer answer env_method. Save
+                # immediately with the last captured curriculum snapshot.
+                recovery_path = model_dir / f"{arguments.run_name}_recovery_{model.num_timesteps}_steps"
+                model.save(recovery_path)
+                recovery_note = f" Recovery policy saved to {recovery_path}.zip."
+            except Exception as save_error:
+                recovery_note = f" Recovery save failed: {save_error}."
+        control.write_status("failed", model.num_timesteps if "model" in locals() else 0, (str(error) or type(error).__name__) + recovery_note)
         raise
     finally:
         if evaluation_env is not None:

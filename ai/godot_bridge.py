@@ -15,6 +15,10 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+class ResetUnavailableError(RuntimeError):
+    """A generated map has no validated trip; another seed may be tried."""
+
+
 def find_godot(executable: str | None = None) -> str:
     """Resolve Godot from an explicit path, GODOT_BIN, or PATH."""
     candidate = executable or os.environ.get("GODOT_BIN")
@@ -120,6 +124,8 @@ class GodotBridge:
         self._receive_buffer = bytearray(remainder)
         response = json.loads(line.decode("utf-8"))
         if "error" in response:
+            if response.get("recoverable_reset"):
+                raise ResetUnavailableError(f"Godot training world: {response['error']}")
             raise RuntimeError(f"Godot training world: {response['error']}")
         return response
 

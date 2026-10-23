@@ -289,10 +289,13 @@ func _sample_random_route_with_turns(
 	maximum_distance: float,
 	minimum_turns: int,
 	random: RandomNumberGenerator,
-	forbidden_road_classes: PackedStringArray
+	forbidden_road_classes: PackedStringArray,
+	minimum_turn_spacing: float = 0.0,
+	terminal_clearance: float = 0.0,
+	attempt_limit: int = 1024
 ) -> Dictionary:
 	var matches: Array[Array] = []
-	var attempts := mini(maxi(128, positions.size() * 4), 1024)
+	var attempts := mini(maxi(128, positions.size() * 4), attempt_limit)
 	for _attempt in range(attempts):
 		var start := random.randi_range(0, positions.size() - 1)
 		var node_path: Array[int] = [start]
@@ -301,17 +304,27 @@ func _sample_random_route_with_turns(
 		var distance := 0.0
 		var turns := 0
 		var previous_direction := Vector2.ZERO
+		var previous_turn_distance := 0.0
 		for _step in range(positions.size() * 2):
 			var next_nodes: Array[int] = []
 			for neighbor_value in adjacency[current]:
 				var neighbor := int(neighbor_value)
-				if neighbor == previous:
+				# Never revisit a node: repeated sections make route progress and
+				# destination proximity ambiguous for a driving episode.
+				if neighbor == previous or node_path.has(neighbor):
 					continue
 				var road_class := String(edge_road_classes.get(
 					_edge_key(current, neighbor), ""
 				))
 				if forbidden_road_classes.has(road_class):
 					continue
+				var next_direction := (positions[neighbor] - positions[current]).normalized()
+				if previous_direction != Vector2.ZERO:
+					var angle := absf(previous_direction.angle_to(next_direction))
+					if minimum_turn_spacing > 0.0 and angle >= deg_to_rad(145.0):
+						continue
+					if angle >= deg_to_rad(32.0) and distance - previous_turn_distance < minimum_turn_spacing:
+						continue
 				if distance + positions[current].distance_to(positions[neighbor]) \
 				> maximum_distance:
 					continue
@@ -323,18 +336,23 @@ func _sample_random_route_with_turns(
 			if previous_direction != Vector2.ZERO \
 			and absf(previous_direction.angle_to(direction)) >= deg_to_rad(32.0):
 				turns += 1
+				previous_turn_distance = distance
 			distance += positions[current].distance_to(positions[next_node])
 			node_path.append(next_node)
 			previous = current
 			current = next_node
 			previous_direction = direction
-			if distance >= minimum_distance and turns >= minimum_turns:
+			if distance >= minimum_distance and turns >= minimum_turns and distance - previous_turn_distance >= terminal_clearance:
 				matches.append(node_path)
 				break
 	if matches.is_empty():
 		return {}
 	var chosen: Array[int] = matches[random.randi_range(0, matches.size() - 1)]
 	return _route_data_for_node_path(chosen, _count_route_turns(chosen), true)
+
+
+func choose_driving_route(minimum_distance: float, maximum_distance: float, minimum_turns: int, random: RandomNumberGenerator, minimum_radius: float) -> Dictionary:
+	return _sample_random_route_with_turns(minimum_distance, maximum_distance, minimum_turns, random, PackedStringArray(["roundabout"]), minimum_radius * 2.0, 180.0, 128)
 
 
 func choose_random_route_from_node(

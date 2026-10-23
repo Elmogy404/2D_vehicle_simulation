@@ -244,7 +244,10 @@ func generate_road() -> void:
 		route_half_widths.append(width * 0.5)
 
 	route.build(center_points, route_half_widths, lane_profile, lane_width)
-	road_network.build(get_map_paths(), get_map_path_half_width_profiles())
+	var network_classes := PackedStringArray(["arterial"])
+	network_classes.append_array(secondary_path_classes)
+	var network_lane_profiles: Array[PackedFloat32Array] = []
+	road_network.build(get_map_paths(), get_map_path_half_width_profiles(), network_lane_profiles, network_classes)
 
 	build_road_polygon()
 	# Lay the continuous main-road curbs before side-street asphalt. Junction

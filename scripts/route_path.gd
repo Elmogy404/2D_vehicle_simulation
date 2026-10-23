@@ -40,6 +40,10 @@ var lane_width: float = 90.0
 var length: float = 0.0
 var max_segment_length: float = 0.0
 
+# Graph edges can be hundreds of units long. Blend their corner directions
+# locally; a negative value preserves the historical dense-road behavior.
+var direction_blend_distance: float = -1.0
+
 
 # ============================================================
 # BUILD
@@ -164,6 +168,8 @@ func get_position_at(
 		normals[segment + 1],
 		t
 	)
+	if direction_blend_distance >= 0.0:
+		normal = get_normal_at(distance)
 
 	if normal.length_squared() < 0.0001:
 		normal = normals[segment]
@@ -181,6 +187,18 @@ func get_direction_at(distance: float) -> Vector2:
 	var segment: int = _segment_for(clamped)
 
 	var t: float = _segment_t(segment, clamped)
+	if direction_blend_distance >= 0.0:
+		var segment_direction := (points[segment + 1] - points[segment]).normalized()
+		var blend := minf(direction_blend_distance, (cumulative[segment + 1] - cumulative[segment]) * 0.5)
+		if blend <= 0.0:
+			return segment_direction
+		var from_start := clamped - cumulative[segment]
+		var to_end := cumulative[segment + 1] - clamped
+		if from_start < blend:
+			return tangents[segment].slerp(segment_direction, from_start / blend).normalized()
+		if to_end < blend:
+			return tangents[segment + 1].slerp(segment_direction, to_end / blend).normalized()
+		return segment_direction
 
 	var direction: Vector2 = tangents[segment].lerp(
 		tangents[segment + 1],
@@ -270,7 +288,8 @@ func get_pose_at(
 func nearest(
 	position: Vector2,
 	hint: float = -1.0,
-	window: float = -1.0
+	window: float = -1.0,
+	limit_progress: bool = false
 ) -> Dictionary:
 	var result: Dictionary = {
 		"distance": INF,
@@ -306,6 +325,11 @@ func nearest(
 			0.0,
 			1.0
 		)
+		if limit_progress and hint >= 0.0 and window > 0.0:
+			var segment_length := cumulative[i + 1] - cumulative[i]
+			var low := clampf((hint - window - cumulative[i]) / segment_length, 0.0, 1.0)
+			var high := clampf((hint + window - cumulative[i]) / segment_length, 0.0, 1.0)
+			t = clampf(t, low, high)
 
 		var closest: Vector2 = a + segment_vector * t
 
