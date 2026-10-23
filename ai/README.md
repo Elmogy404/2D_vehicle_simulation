@@ -1,9 +1,10 @@
 # PPO driving setups
 
-Environment version 2 fixes the driving reference geometry and simulation
-stepping. Start a **new training run** after updating; old checkpoints remain
-available for inspection but cannot be resumed into version 2. The default CLI
-run name is `setup2_network_routes_ppo_v2`.
+Environment version 3 accelerates headless simulation, removes a conflicting
+lane/edge reward, and introduces gradual first-turn practice. Start a **new
+training run** after updating; earlier checkpoints remain available for
+inspection but cannot be resumed into version 3. The default CLI run name is
+`setup2_network_routes_ppo_v3`. See [the changes and validation](TRAINING_V3.md).
 
 Training now builds rounded, car-feasible driving paths from the street graph,
 keeps heading changes local, and adjusts lane position for body clearance and
@@ -59,7 +60,8 @@ signals, so the reserved slots indicate “no signal.” PPO controls steering a
 signed acceleration/braking; the training adapter prevents unintended reverse.
 The shared ego car now tops out at 150 km/h (500 world units/s), and training
 can award a small per-step bonus at 98% of that speed or higher while making
-forward progress on the road. Set **Top-speed reward** to zero to disable it.
+forward progress on the road. **Top-speed reward** defaults to zero so turning
+and braking do not compete with a reward for reaching the speed limiter.
 
 ## Train and evaluate Setup 2
 
@@ -73,26 +75,41 @@ python -m pip install -r ai/requirements.txt
 $env:GODOT_BIN = "C:\path\to\Godot_v4_console.exe"
 python ai/smoke_test.py
 python ai/train.py --n-envs 6
-python ai/evaluate.py --model ai/models/setup2_network_routes_ppo_v2_best.zip --episodes 50 --seed 20000 --curriculum-stage 7
-python ai/evaluate.py --model ai/models/setup2_network_routes_ppo_v2_best.zip --episodes 50 --seed 21000 --curriculum-stage 7 --visible
-python ai/watch_policy.py --model ai/models/setup2_network_routes_ppo_v2_best.zip --curriculum-stage 7
+python ai/evaluate.py --model ai/models/setup2_network_routes_ppo_v3_best.zip --episodes 50 --seed 20000 --curriculum-stage 7
+python ai/evaluate.py --model ai/models/setup2_network_routes_ppo_v3_best.zip --episodes 50 --seed 21000 --curriculum-stage 7 --visible
+python ai/watch_policy.py --model ai/models/setup2_network_routes_ppo_v3_best.zip --curriculum-stage 7
 ```
 
 The default training cap is 1,000,000 timesteps. The route-distance curriculum
 has eight tiers from 250–400 through 4,200–5,500 units. Longer tiers request
 increasingly many meaningful turns. Each training worker advances only after
 at least 80% success over its latest 20 completed episodes. Training maps vary
-in length, intersections, corridors, and generated seed.
+in length, intersections, corridors, and generated seed. Stage 3 first learns
+turns with 45 km/h, then 75 km/h, then the full 150 km/h speed limit; each level
+requires the same success gate. From stage 3 onward, 20% of trips replay an
+easier stage to retain earlier skills. Replay does not advance the frontier.
+The default discount factor is 0.999 for the longer trips.
+
+Headless worlds run without waiting for real time while retaining exactly
+four 1/60-second physics updates per action. They omit artwork, update sensors
+once per action, and reuse a generated map for at most eight training episodes.
+Every new trip still passes collision/turn validation. Explicitly seeded
+evaluation regenerates its map. PPO uses one CPU thread by default; tune it
+with `--torch-threads`. Visible watch/evaluation runs at normal speed.
 
 Early stopping is on by default: after an evaluation, training stops only when
 both the overall mixed-tier suite and the longest 4,200–5,500-unit tier meet
 the configured success threshold, and the longest tier meets its requested
 turn count, for three consecutive evaluations. Each
-evaluation uses 16 deterministic episodes spanning all eight tiers. Change the
+evaluation uses 64 deterministic episodes spanning all eight tiers, run across
+four evaluation worlds with batched policy inference. Use `--eval-workers` to
+adjust concurrency. Stage reports include sample counts and Wilson 95% success
+intervals; eight episodes per stage still give a wide interval. Change the
 streak with `--early-stop-patience N`, or disable it with
 `--early-stop-patience 0`. Increase `--steps` for a larger cap; early stopping
-still applies. The best checkpoint is selected by overall success, then crash
-and off-road rates. Logs and CSV evaluation results go under `ai/runs/`, while
+still applies. Best selection prioritizes longest-stage success and valid turn
+coverage, then overall success, crash/off-road rates, and return. Logs, CSV
+summaries and detailed per-stage evaluation JSON go under `ai/runs/`, while
 models and periodic checkpoints go under `ai/models/`.
 
 ## Train from the Godot GUI
@@ -112,12 +129,17 @@ separate Python process, so the game can stay paused or be closed while PPO
 runs. The tab finds `.venv-ai/Scripts/python.exe` and the running Godot
 executable by default; edit either path if your installation differs.
 
-Set the worker count (each worker launches one headless Godot world), total
+Open **Run setup** to set the worker count (each worker launches one headless Godot world), total
 timesteps, seed, PPO parameters, checkpoint/evaluation intervals, early-stop
 threshold, and reward/penalty weights before pressing **Start training**.
 **Pause** waits for the current environment step, **Resume** continues, and
-**End and save** stops cleanly and saves the latest policy. The progress area
-shows training steps and the last evaluation. The run log, control/status
+**End and save** stops cleanly and saves the latest policy. **Overview** shows
+steps/second, elapsed time and training ETA, recent success/crash/stall/timeout,
+mean return and progress, a success trend, each worker's curriculum and speed,
+reset timings, per-stage evaluation counts and confidence intervals, optimizer
+diagnostics, and checkpoint/log links. Training ETA excludes future evaluation
+time. Live training statistics cover the last 200 completed episodes; checkpoint
+evaluation uses a separate fixed full-speed suite. The run log, control/status
 files, and a JSON copy of the reward weights are saved under `ai/runs/`;
 models and a reproducibility manifest are saved under `ai/models/` unless an
 output folder is set. Reopening the project reconnects to an active GUI run.

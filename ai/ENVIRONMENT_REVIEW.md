@@ -1,7 +1,10 @@
 # Training environment fixes and deeper checks
 
-Reviewed and verified on 23 October 2026. The training environment is now
-version 2; start a new run. The network still has 31 inputs and two continuous
+This records the version 2 geometry/stepping baseline. Version 3 builds on
+these fixes; see [the current changes and validation](TRAINING_V3.md).
+
+Reviewed and verified on 23 October 2026. Version 2 required a new run.
+The network still has 31 inputs and two continuous
 actions, but its route previews, stepping, and rewards have changed.
 
 ## Fixes
@@ -79,7 +82,8 @@ Run the sweeps from the project folder:
 ```
 
 The sweep runs the same 1/60-second vehicle integration at an accelerated wall
-clock rate. Normal training retains the project's regular physics rate.
+clock rate. Version 2 training retained the project's regular wall-clock rate;
+version 3 accelerates headless training with the same fixed simulation timestep.
 
 These checks establish sampled reference clearance, deterministic stepping,
 and dynamic reachability examples. They do not establish that a trained PPO

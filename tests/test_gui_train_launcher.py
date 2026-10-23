@@ -13,6 +13,17 @@ LAUNCHER = Path(__file__).resolve().parents[1] / "ai" / "gui_train_launcher.py"
 
 
 class GuiLauncherTests(unittest.TestCase):
+    def test_probe_distinguishes_external_live_and_exited_processes(self) -> None:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            result = subprocess.run([sys.executable, str(LAUNCHER), "--probe-pid", str(child.pid)], timeout=10)
+            self.assertEqual(result.returncode, 0)
+        finally:
+            child.terminate()
+            child.wait(timeout=10)
+        result = subprocess.run([sys.executable, str(LAUNCHER), "--probe-pid", str(child.pid)], timeout=10)
+        self.assertEqual(result.returncode, 1)
+
     def launch(self, source: str, state: str = "starting") -> tuple[subprocess.CompletedProcess, str, dict]:
         with tempfile.TemporaryDirectory(prefix="training launcher with spaces ") as directory:
             project = Path(directory)

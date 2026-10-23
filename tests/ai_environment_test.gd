@@ -25,6 +25,8 @@ func _run() -> void:
 	Engine.time_scale = 10.0
 	var world := TestWorld.new()
 	root.add_child(world)
+	_check(is_zero_approx(world._edge_pressure(35.0, 35.0, 49.0)), "correct target lane receives edge penalty")
+	_check(world._edge_pressure(48.0, 35.0, 49.0) > 0.8, "near-curb danger is not penalized")
 	var checked := 0
 	var replacements := 0
 	for offset in range(20):
@@ -75,6 +77,30 @@ func _run() -> void:
 	world._restore_training_state({"curriculum_stage": 5, "recent_results": [true, false, true]})
 	await world._reset_episode(4101, false, 0)
 	_check(world.curriculum_stage == 5 and world.curriculum_recent_results.size() == 3, "fixed-stage evaluation changed curriculum")
+	world.curriculum_stage = 3
+	world.active_episode_stage = 3
+	world.turn_level = 0
+	world.curriculum_enabled = true
+	world.curriculum_recent_results.clear()
+	world.active_episode_stage = 1
+	for _episode in range(20):
+		world._record_curriculum_outcome(true)
+	_check(world.curriculum_recent_results.is_empty() and world.turn_level == 0, "easy replay advanced the frontier")
+	world.active_episode_stage = 3
+	for _episode in range(20):
+		world._record_curriculum_outcome(true)
+	_check(world.curriculum_stage == 3 and world.turn_level == 1, "first-turn practice skipped its intermediate speed")
+	for _episode in range(20):
+		world._record_curriculum_outcome(true)
+	_check(world.curriculum_stage == 3 and world.turn_level == 2, "turn practice did not reach full speed")
+	for _episode in range(20):
+		world._record_curriculum_outcome(true)
+	_check(world.curriculum_stage == 4, "completed turn practice did not advance distance curriculum")
+	world.curriculum_stage = 7
+	world.active_episode_stage = 7
+	for _episode in range(25):
+		world._record_curriculum_outcome(true)
+	_check(world.curriculum_stage == 7 and world.curriculum_recent_results.size() == 20, "final-stage recent success telemetry")
 	# Repeating previously visited distance must not generate fresh progress reward.
 	var forward_rewards: Array[float] = []
 	for offset in [30.0, 0.0, 30.0]:

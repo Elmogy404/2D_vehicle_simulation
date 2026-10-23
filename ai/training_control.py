@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 import time
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 
 DEFAULT_REWARD_CONFIG: dict[str, float] = {
     "progress_gain": 1.0,
-    "max_speed_reward": 0.05,
+    "max_speed_reward": 0.0,
     "lane_penalty": 0.12,
     "edge_penalty": 0.6,
     "heading_penalty": 0.08,
@@ -66,6 +67,11 @@ class TrainingControl:
         self.last_reported_steps = -1
         self.last_evaluation: dict[str, Any] = {}
         self.message = "Starting PPO training"
+        self.metrics: dict[str, Any] = {}
+        self.last_status_time = 0.0
+        self.last_command_time = 0.0
+        self.cached_command = "run"
+        self.paused_seconds = 0.0
 
     def write_status(self, state: str, timesteps: int, message: str = "") -> None:
         self.state = state
@@ -76,6 +82,7 @@ class TrainingControl:
         payload = {
             "run_id": self.run_id,
             "pid": os.getpid(),
+            "python_path": sys.executable,
             "state": state,
             "timesteps": timesteps,
             "total_steps": self.total_steps,
@@ -86,6 +93,7 @@ class TrainingControl:
             "last_evaluation": self.last_evaluation,
             "updated_at": time.time(),
         }
+        payload.update(self.metrics)
         self.status_file.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.status_file.with_name(self.status_file.name + f".{os.getpid()}.tmp")
         temporary.write_text(json.dumps(payload), encoding="utf-8")
@@ -105,22 +113,30 @@ class TrainingControl:
         return command if command in {"run", "pause", "stop"} else "run"
 
     def poll(self, timesteps: int) -> bool:
-        command = self._command()
+        now = time.monotonic()
+        if now - self.last_command_time >= 0.1 or self.state != "running":
+            self.cached_command = self._command()
+            self.last_command_time = now
+        command = self.cached_command
         if command == "stop":
             self.stop_requested = True
             self.write_status("stopping", timesteps, "Saving the current model and stopping")
             return False
         if command == "pause":
+            pause_started = time.monotonic()
             self.write_status("paused", timesteps, "Training paused; workers are idle")
             while command == "pause":
                 time.sleep(0.2)
                 command = self._command()
+            self.paused_seconds += time.monotonic() - pause_started
+            self.cached_command = command
             if command == "stop":
                 self.stop_requested = True
                 self.write_status("stopping", timesteps, "Saving the current model and stopping")
                 return False
             self.write_status("running", timesteps, "Training resumed")
-        elif timesteps - self.last_reported_steps >= 256 or self.state != "running":
+        elif now - self.last_status_time >= 0.5 or self.state != "running":
             self.write_status("running", timesteps, "Training in progress")
             self.last_reported_steps = timesteps
+            self.last_status_time = now
         return True

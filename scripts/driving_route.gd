@@ -11,6 +11,7 @@ var curve_offsets := PackedFloat32Array()
 var failure_reason := ""
 var usable_start := 0.0
 var usable_end := 0.0
+var offset_samples := PackedFloat32Array()
 
 
 func build_from_graph(graph_points: PackedVector2Array, widths: PackedFloat32Array, nominal_lane_width: float, minimum_radius: float) -> bool:
@@ -20,6 +21,7 @@ func build_from_graph(graph_points: PackedVector2Array, widths: PackedFloat32Arr
 	curve_ranges.clear()
 	curve_offsets.clear()
 	failure_reason = ""
+	offset_samples.clear()
 	var original: Array[Vector2] = []
 	for point in graph_points:
 		original.append(point)
@@ -122,6 +124,8 @@ func build_from_graph(graph_points: PackedVector2Array, widths: PackedFloat32Arr
 		turn_starts.append(cumulative[interval.x])
 		turn_ends.append(cumulative[interval.y])
 		turn_ranges.append(Vector2(cumulative[interval.x], cumulative[interval.y]))
+	for progress in cumulative:
+		offset_samples.append(_compute_driving_offset(progress))
 	return is_valid()
 
 
@@ -136,6 +140,13 @@ func _append_line(output: Array[Vector2], output_widths: PackedFloat32Array, end
 
 
 func get_driving_offset(progress: float) -> float:
+	if offset_samples.size() == points.size() and is_valid():
+		var segment := _segment_for(progress)
+		return lerpf(offset_samples[segment], offset_samples[segment + 1], _segment_t(segment, clampf(progress, 0.0, length)))
+	return _compute_driving_offset(progress)
+
+
+func _compute_driving_offset(progress: float) -> float:
 	# A nominal half-lane offset leaves only 40 units on an 80-unit half
 	# street, less than the 31-unit half body plus the 10-unit spawn margin.
 	var nominal := minf(35.0, minf(lane_width * 0.5, maxf(0.0, get_half_width_at(progress) - 45.0)))

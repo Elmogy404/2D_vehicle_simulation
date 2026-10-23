@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 from functools import partial
 import json
 import math
@@ -66,7 +65,8 @@ def restore_training_state(model: object) -> None:
 def main() -> None:
     # Keep torch/SB3 out of spawned worker imports to limit per-worker memory.
     from stable_baselines3 import PPO
-    from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, BaseCallback
+    import torch
+    from training_callbacks import make_callbacks
     from stable_baselines3.common.vec_env import SubprocVecEnv
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -75,19 +75,21 @@ def main() -> None:
     parser.add_argument("--n-envs", type=int, default=1, help="Parallel Godot training worlds")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--gamma", type=float, default=0.995)
+    parser.add_argument("--gamma", type=float, default=0.999)
     parser.add_argument("--entropy-coefficient", type=float, default=0.01)
     parser.add_argument("--checkpoint-every", type=int, default=10_240)
     parser.add_argument(
         "--run-name",
-        default="setup2_network_routes_ppo_v2",
+        default="setup2_network_routes_ppo_v3",
         help="Versioned basename for this run's model/checkpoints (without extension)",
     )
+    parser.add_argument("--torch-threads", type=int, default=1)
+    parser.add_argument("--eval-workers", type=int, default=4)
     parser.add_argument("--eval-every", type=int, default=50_000)
     parser.add_argument(
         "--eval-episodes",
         type=int,
-        default=16,
+        default=64,
         help="Mixed-tier deterministic episodes per checkpoint evaluation",
     )
     parser.add_argument("--eval-seed", type=int, default=10_000)
@@ -124,6 +126,9 @@ def main() -> None:
         reward_config = parse_reward_config(reward_source)
     except (OSError, ValueError, TypeError) as error:
         parser.error(str(error))
+    if not 1 <= arguments.torch_threads <= 64 or not 1 <= arguments.eval_workers <= 32:
+        parser.error("thread and evaluation worker counts must be positive and within their supported limits")
+    torch.set_num_threads(arguments.torch_threads)
     if arguments.steps < 1:
         parser.error("--steps must be at least 1")
     if arguments.n_envs < 1:
@@ -241,270 +246,10 @@ def main() -> None:
             )
             remaining_steps = arguments.steps
 
-        class StatefulCheckpointCallback(CheckpointCallback):
-            def _on_step(self) -> bool:
-                if self.n_calls % self.save_freq == 0:
-                    capture_training_state(self.model)
-                return super()._on_step()
-
-        checkpoint_callback = StatefulCheckpointCallback(
-            save_freq=max(1, arguments.checkpoint_every // arguments.n_envs),
-            save_path=str(checkpoint_dir),
-            name_prefix=arguments.run_name,
-            verbose=1,
+        callback, evaluation_env = make_callbacks(
+            arguments, control, model, model_dir, runs_dir, capture_training_state,
+            partial(make_training_env, arguments.godot, reward_config),
         )
-
-        class GuiControlCallback(BaseCallback):
-            def _on_training_start(self) -> None:
-                capture_training_state(self.model)
-                control.write_status("running", self.num_timesteps, "Training in progress")
-
-            def _on_step(self) -> bool:
-                return control.poll(self.num_timesteps)
-
-        callbacks = [GuiControlCallback()]
-
-        if arguments.eval_every > 0:
-            evaluation_env = make_training_env(arguments.godot, reward_config)
-
-            class SuccessRateEvalCallback(BaseCallback):
-                """Compare checkpoints by a fixed, mixed-difficulty success suite."""
-
-                def __init__(self) -> None:
-                    super().__init__(verbose=0)
-                    self.next_eval_timestep = arguments.eval_every
-                    self.best_score: tuple[float, float, float, float, float, float] | None = None
-                    self.early_stop_streak = 0
-                    self.can_early_stop = arguments.eval_episodes >= 8
-                    self.best_path = model_dir / f"{arguments.run_name}_best"
-                    self.csv_path = runs_dir / f"{arguments.run_name}_success_eval.csv"
-                    self.score_path = model_dir / f"{arguments.run_name}_best_score.json"
-                    if arguments.resume and self.score_path.exists():
-                        previous = json.loads(self.score_path.read_text(encoding="utf-8"))
-                        if previous.get("environment_version") == ENVIRONMENT_VERSION:
-                            self.best_score = tuple(previous["score"])
-                    resumed_evaluation = getattr(model, "training_evaluation_state", {})
-                    resumed_best = resumed_evaluation.get("best_score")
-                    if resumed_best is not None:
-                        self.best_score = max(self.best_score or tuple(resumed_best), tuple(resumed_best))
-                    self.early_stop_streak = int(resumed_evaluation.get("early_stop_streak", 0))
-                    if not self.csv_path.exists():
-                        with self.csv_path.open("w", newline="", encoding="utf-8") as csv_file:
-                            csv.writer(csv_file).writerow(
-                                [
-                                    "timesteps",
-                                    "episodes",
-                                    "stage_mix",
-                                    "success_rate",
-                                    "crash_rate",
-                                    "off_road_rate",
-                                    "mean_steps",
-                                    "mean_route_turns",
-                                    "longest_stage_success_rate",
-                                    "longest_stage_turn_coverage",
-                                    "mean_return",
-                                    "best_checkpoint_saved",
-                                    "90_percent_gate_met",
-                                    "early_stop_streak",
-                                ]
-                            )
-
-                def _on_training_start(self) -> None:
-                    self.next_eval_timestep = (
-                        self.num_timesteps // arguments.eval_every + 1
-                    ) * arguments.eval_every
-                    if arguments.early_stop_patience > 0 and not self.can_early_stop:
-                        print(
-                            "Early stopping disabled for this run: --eval-episodes "
-                            "must cover all 8 route-distance stages.",
-                            flush=True,
-                        )
-
-                def _on_step(self) -> bool:
-                    if self.num_timesteps < self.next_eval_timestep:
-                        return True
-                    self.next_eval_timestep += arguments.eval_every
-                    if not control.poll(self.num_timesteps):
-                        return False
-
-                    outcomes: list[dict[str, float | bool | int]] = []
-                    for episode in range(arguments.eval_episodes):
-                        stage = episode % 8
-                        observation, _reset_info = evaluation_env.reset(
-                            seed=arguments.eval_seed + episode,
-                            options={
-                                "curriculum": False,
-                                "curriculum_stage": stage,
-                            },
-                        )
-                        episode_return = 0.0
-                        steps = 0
-                        final_info: dict[str, object] = {}
-                        while True:
-                            if steps % 64 == 0 and not control.poll(self.num_timesteps):
-                                return False
-                            action, _state = self.model.predict(
-                                observation, deterministic=True
-                            )
-                            (
-                                observation,
-                                reward,
-                                terminated,
-                                truncated,
-                                final_info,
-                            ) = evaluation_env.step(action)
-                            episode_return += float(reward)
-                            steps += 1
-                            if terminated or truncated:
-                                break
-                        outcomes.append(
-                            {
-                                "stage": stage,
-                                "success": bool(final_info.get("success", False)),
-                                "crashed": bool(final_info.get("crashed", False)),
-                                "off_road": bool(final_info.get("off_road", False)),
-                                "steps": float(steps),
-                                "route_turns": float(final_info.get("route_turns", 0)),
-                                "turn_requirement_met": bool(
-                                    final_info.get("turn_requirement_met", False)
-                                ),
-                                "return": episode_return,
-                            }
-                        )
-
-                    count = float(len(outcomes))
-                    success_rate = sum(
-                        bool(item["success"]) for item in outcomes
-                    ) / count
-                    crash_rate = sum(
-                        bool(item["crashed"]) for item in outcomes
-                    ) / count
-                    off_road_rate = sum(
-                        bool(item["off_road"]) for item in outcomes
-                    ) / count
-                    mean_steps = sum(float(item["steps"]) for item in outcomes) / count
-                    mean_route_turns = sum(
-                        float(item["route_turns"]) for item in outcomes
-                    ) / count
-                    mean_return = sum(float(item["return"]) for item in outcomes) / count
-                    longest_stage_outcomes = [
-                        item for item in outcomes if int(item["stage"]) == 7
-                    ]
-                    longest_stage_success_rate = (
-                        sum(bool(item["success"]) for item in longest_stage_outcomes)
-                        / float(len(longest_stage_outcomes))
-                        if longest_stage_outcomes
-                        else 0.0
-                    )
-                    longest_stage_turn_coverage = (
-                        sum(bool(item.get("turn_requirement_met", False)) for item in longest_stage_outcomes)
-                        / float(len(longest_stage_outcomes))
-                        if longest_stage_outcomes
-                        else 0.0
-                    )
-                    stage_mix = ";".join(
-                        str(int(item["stage"])) for item in outcomes
-                    )
-                    score = (
-                        longest_stage_success_rate,
-                        longest_stage_turn_coverage,
-                        success_rate,
-                        -crash_rate,
-                        -off_road_rate,
-                        mean_return,
-                    )
-                    save_best = self.best_score is None or score > self.best_score
-                    if save_best:
-                        self.best_score = score
-
-                    overall_gate_met = success_rate >= arguments.success_threshold
-                    longest_route_gate_met = (
-                        longest_stage_success_rate >= arguments.success_threshold
-                        and longest_stage_turn_coverage >= arguments.success_threshold
-                    )
-                    gate_met = overall_gate_met and longest_route_gate_met
-                    if arguments.early_stop_patience > 0 and self.can_early_stop:
-                        self.early_stop_streak = self.early_stop_streak + 1 if gate_met else 0
-                    self.model.training_evaluation_state = {
-                        "best_score": self.best_score,
-                        "early_stop_streak": self.early_stop_streak,
-                    }
-                    if save_best:
-                        capture_training_state(self.model)
-                        self.model.save(self.best_path)
-                        temporary_score = self.score_path.with_suffix(".tmp")
-                        temporary_score.write_text(json.dumps({"environment_version": ENVIRONMENT_VERSION, "score": score}), encoding="utf-8")
-                        temporary_score.replace(self.score_path)
-                    print(
-                        "SUCCESS EVAL steps=%d episodes=%d stages=%s success=%.1f%% "
-                        "crash=%.1f%% off_road=%.1f%% mean_steps=%.1f turns=%.2f "
-                        "longest_stage=%.1f%% turn_coverage=%.1f%% mean_return=%.2f best_saved=%s "
-                        "gate_%d%%=%s stop_streak=%d/%d"
-                        % (
-                            self.num_timesteps,
-                            len(outcomes),
-                            stage_mix,
-                            success_rate * 100.0,
-                            crash_rate * 100.0,
-                            off_road_rate * 100.0,
-                            mean_steps,
-                            mean_route_turns,
-                            longest_stage_success_rate * 100.0,
-                            longest_stage_turn_coverage * 100.0,
-                            mean_return,
-                            save_best,
-                            int(arguments.success_threshold * 100),
-                            gate_met,
-                            self.early_stop_streak,
-                            arguments.early_stop_patience,
-                        ),
-                        flush=True,
-                    )
-                    control.last_evaluation = {
-                        "timesteps": self.num_timesteps,
-                        "success_rate": success_rate,
-                        "crash_rate": crash_rate,
-                        "off_road_rate": off_road_rate,
-                        "longest_stage_success_rate": longest_stage_success_rate,
-                        "best_checkpoint_saved": save_best,
-                    }
-                    control.write_status("running", self.num_timesteps, "Evaluation complete")
-                    with self.csv_path.open("a", newline="", encoding="utf-8") as csv_file:
-                        csv.writer(csv_file).writerow(
-                            [
-                                self.num_timesteps,
-                                len(outcomes),
-                                stage_mix,
-                                success_rate,
-                                crash_rate,
-                                off_road_rate,
-                                mean_steps,
-                                mean_route_turns,
-                                longest_stage_success_rate,
-                                longest_stage_turn_coverage,
-                                mean_return,
-                                save_best,
-                                gate_met,
-                                self.early_stop_streak,
-                            ]
-                        )
-                    if (
-                        arguments.early_stop_patience > 0
-                        and self.can_early_stop
-                        and self.early_stop_streak >= arguments.early_stop_patience
-                    ):
-                        print(
-                            "EARLY STOP: success gates held for %d consecutive evaluations at %d timesteps."
-                            % (self.early_stop_streak, self.num_timesteps),
-                            flush=True,
-                        )
-                        return False
-                    return True
-
-            callbacks.append(SuccessRateEvalCallback())
-
-        callbacks.append(checkpoint_callback)
-        callback = CallbackList(callbacks)
         model.learn(
             total_timesteps=remaining_steps,
             callback=callback,
@@ -515,6 +260,8 @@ def main() -> None:
         control.write_status("saving", model.num_timesteps, "Saving the latest PPO model")
         capture_training_state(model)
         model.save(output)
+        control.metrics["last_model_path"] = str(output) + ".zip"
+        control.metrics["phase"] = "finished"
         print(f"Saved PPO policy to {output}.zip")
         control.write_status(
             "stopped" if control.stop_requested else "completed",

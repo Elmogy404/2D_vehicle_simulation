@@ -8,6 +8,7 @@ func _initialize() -> void:
 	var vehicle := EGO_SCENE.instantiate()
 	var world := WORLD_SCRIPT.new()
 	world.set("ego", vehicle)
+	world.set("reward_config", {"max_speed_reward": 0.05})
 	var limit := float(vehicle.get("max_speed"))
 	var display_speed := limit * float(vehicle.get("kmh_per_unit"))
 	if not is_equal_approx(limit, 500.0) or not is_equal_approx(display_speed, 150.0):

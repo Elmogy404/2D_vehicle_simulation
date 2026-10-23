@@ -11,6 +11,37 @@ import sys
 import traceback
 
 
+def process_is_running(pid: int) -> bool:
+    """Check an external PID, including processes another Godot window started."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # Access denied still proves it exists.
+        try:
+            code = wintypes.DWORD()
+            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except ProcessLookupError:
+        return False
+
+
 def report_failure(arguments: list[str], message: str) -> None:
     """Report failures that occur before the trainer creates TrainingControl."""
     def option(name: str) -> str:
@@ -38,6 +69,8 @@ def report_failure(arguments: list[str], message: str) -> None:
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--probe-pid":
+        raise SystemExit(0 if process_is_running(int(sys.argv[2])) else 1)
     if len(sys.argv) < 4 or sys.argv[1] != "--log-file":
         raise SystemExit("Usage: gui_train_launcher.py --log-file PATH [train.py options]")
     log_path = Path(sys.argv[2])

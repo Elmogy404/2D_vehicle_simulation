@@ -18,7 +18,7 @@ from training_control import TrainingControl, parse_reward_config
 class TrainingControlTests(unittest.TestCase):
     def test_reward_config_validation(self) -> None:
         self.assertEqual(parse_reward_config(None)["goal_reward"], 40.0)
-        self.assertEqual(parse_reward_config(None)["max_speed_reward"], 0.05)
+        self.assertEqual(parse_reward_config(None)["max_speed_reward"], 0.0)
         self.assertEqual(parse_reward_config('{"goal_reward": 75}')["goal_reward"], 75.0)
         self.assertEqual(parse_reward_config('{"max_speed_reward": 0.2}')["max_speed_reward"], 0.2)
         for invalid in ('{"unknown": 1}', '{"goal_reward": -1}', '{"goal_reward": "high"}'):

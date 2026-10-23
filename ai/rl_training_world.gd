@@ -32,7 +32,7 @@ const ROAD_PREVIEW_DISTANCES := [60.0, 120.0, 240.0, 400.0]
 const OBSERVATION_SIZE := 31
 const DEFAULT_REWARD_CONFIG := {
 	"progress_gain": 1.0,
-	"max_speed_reward": 0.05,
+	"max_speed_reward": 0.0,
 	"lane_penalty": 0.12,
 	"edge_penalty": 0.6,
 	"heading_penalty": 0.08,
@@ -77,13 +77,18 @@ var visible_mode := false
 var reward_config: Dictionary = DEFAULT_REWARD_CONFIG.duplicate()
 var trip_rejections: Dictionary = {}
 var episode_map_attempts := 0
+var map_episodes := 0
+var validation_cache: Dictionary = {}
+var turn_level := 0
+var base_max_speed := 500.0
+var episode_reset_ms := 0.0
 
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_parse_port_argument()
-	_setup_training_world()
 	visible_mode = OS.get_cmdline_user_args().has("--visible")
+	_setup_training_world()
 	if visible_mode:
 		_setup_monitor_hud()
 	# Static worlds keep running; only this node advances the car, and only
@@ -91,6 +96,7 @@ func _ready() -> void:
 	# races with the actual vehicle update and changes action duration.
 	get_tree().paused = false
 	var connect_error := tcp_peer.connect_to_host("127.0.0.1", tcp_port)
+	tcp_peer.set_no_delay(true)
 	if connect_error != OK:
 		push_error("PPO bridge: could not start TCP connection (%s)." % connect_error)
 
@@ -108,6 +114,8 @@ func _parse_port_argument() -> void:
 func _setup_training_world() -> void:
 	road_generator = ROAD_SCENE.instantiate()
 	road_generator.set("enable_hotkeys", false)
+	road_generator.set("generate_on_ready", false)
+	road_generator.set("build_visuals", visible_mode)
 	# Setup 2 trains on the complete connected district instead of the arterial
 	# alone. Longer arterials and several collector/local corridors make 5,000+
 	# unit routes with multiple junction turns available to the planner.
@@ -122,6 +130,9 @@ func _setup_training_world() -> void:
 	ego = EGO_SCENE.instantiate() as CharacterBody2D
 	add_child(ego)
 	ego.set_physics_process(false)
+	base_max_speed = float(ego.get("max_speed"))
+	if not visible_mode:
+		ego.get_node("Camera2D").set_process(false)
 	var sensor_rig: Node = ego.get_node("SensorRig")
 	sensor_rig.set("show_rays", false)
 	sensor_rig.set_physics_process(false)
@@ -141,6 +152,9 @@ func _setup_monitor_hud() -> void:
 
 
 func _process(_delta: float) -> void:
+	# Accelerated worlds otherwise spin at full CPU while PPO updates weights.
+	if not step_in_progress and pending_lines.is_empty():
+		OS.delay_usec(500)
 	tcp_peer.poll()
 	if tcp_peer.get_status() == StreamPeerTCP.STATUS_CONNECTED:
 		var available_bytes := tcp_peer.get_available_bytes()
@@ -189,7 +203,8 @@ func _handle_request(line: String) -> void:
 			var reset_error: String = await _reset_episode(
 				int(message.get("seed", 1)),
 				use_curriculum,
-				requested_stage
+				requested_stage,
+				bool(reset_options.get("reuse_map", false))
 			)
 			if not reset_error.is_empty():
 				_send_message({"error": reset_error, "recoverable_reset": true})
@@ -201,6 +216,8 @@ func _handle_request(line: String) -> void:
 					"seed": int(road_generator.get("seed_value")),
 					"requested_seed": int(message.get("seed", 1)),
 					"map_attempts": episode_map_attempts,
+					"reset_ms": episode_reset_ms,
+					"map_reused": map_episodes > 1,
 					"start_progress": start_progress,
 					"goal_progress": goal_progress,
 					"goal_distance": episode_goal_distance,
@@ -245,8 +262,10 @@ func _set_reward_config(value: Variant) -> String:
 func _reset_episode(
 	new_seed: int,
 	use_curriculum: bool = true,
-	requested_stage: int = -1
+	requested_stage: int = -1,
+	reuse_map: bool = false
 ) -> String:
+	var reset_started := Time.get_ticks_usec()
 	get_tree().paused = false
 	episode_active = false
 	step_in_progress = false
@@ -260,11 +279,25 @@ func _reset_episode(
 	else:
 		active_episode_stage = curriculum_stage if curriculum_enabled else 0
 	episode_rng.seed = posmod(new_seed ^ 0x5EED123, 2147483647)
+	if curriculum_enabled and curriculum_stage >= 3 and episode_rng.randf() < 0.2:
+		active_episode_stage = maxi(0, curriculum_stage - episode_rng.randi_range(1, 2))
+	var speed_caps := [150.0, 250.0, base_max_speed]
+	var cap: float = speed_caps[turn_level] if curriculum_enabled and active_episode_stage == 3 else base_max_speed
+	ego.set("max_speed", cap)
 	var goal_range: Vector2 = GOAL_DISTANCE_STAGES[active_episode_stage]
 	var valid_start := -1.0
 	var selected_goal := -1.0
-	for map_attempt in range(MAP_ATTEMPTS):
+	var cached_selection: Dictionary = {}
+	episode_map_attempts = 0
+	if reuse_map and map_episodes > 0 and map_episodes < 8:
+		cached_selection = _select_trip(goal_range)
+	if not cached_selection.is_empty():
+		valid_start = float(cached_selection["start"])
+		selected_goal = float(cached_selection["goal"])
+		map_episodes += 1
+	for map_attempt in range(MAP_ATTEMPTS if valid_start < 0.0 else 0):
 		episode_map_attempts = map_attempt + 1
+		validation_cache.clear()
 		road_generator.call("generate_with_seed", new_seed + map_attempt * 104729)
 		await get_tree().physics_frame
 		await get_tree().physics_frame
@@ -272,6 +305,7 @@ func _reset_episode(
 		if not selection.is_empty():
 			valid_start = float(selection["start"])
 			selected_goal = float(selection["goal"])
+			map_episodes = 1
 			break
 	if valid_start < 0.0:
 		return "no collision-free trip was found for seed %d at curriculum stage %d: %s" % [new_seed, active_episode_stage, trip_rejections]
@@ -291,6 +325,7 @@ func _reset_episode(
 	var sensors: Node = ego.get_node("SensorRig")
 	sensors.call("update_sensors")
 	episode_active = true
+	episode_reset_ms = float(Time.get_ticks_usec() - reset_started) / 1000.0
 	queue_redraw()
 	return ""
 
@@ -369,12 +404,26 @@ func _count_trip_turns(candidate: RoutePath, first: float, last: float) -> int:
 
 
 func _trip_is_clear(candidate: RoutePath, first: float, last: float) -> bool:
-	var progress := first
+	var cached: Dictionary = validation_cache.get(candidate.get_instance_id(), {})
+	if not cached.is_empty() and not is_equal_approx(float(cached["first"]), first):
+		cached = {}
+	if not cached.is_empty() and is_equal_approx(float(cached["first"]), first):
+		if float(cached.get("blocked", INF)) <= last:
+			return false
+		if float(cached["until"]) >= last:
+			return _spawn_pose_is_clear(candidate, last, 2.0)
+	var progress := maxf(first, float(cached.get("until", first)))
 	while progress < last:
 		if not _spawn_pose_is_clear(candidate, progress, 2.0):
+			validation_cache[candidate.get_instance_id()] = {"first": first, "until": maxf(first, progress - ROUTE_SAMPLE_SPACING), "blocked": progress}
 			return false
 		progress += ROUTE_SAMPLE_SPACING
-	return _spawn_pose_is_clear(candidate, last, 2.0)
+	validation_cache[candidate.get_instance_id()] = {"first": first, "until": last}
+	if not _spawn_pose_is_clear(candidate, last, 2.0):
+		validation_cache[candidate.get_instance_id()]["blocked"] = last
+		validation_cache[candidate.get_instance_id()]["until"] = maxf(first, last - ROUTE_SAMPLE_SPACING)
+		return false
+	return true
 
 
 func _find_safe_spawn_progress(candidate_route: RoutePath, minimum_goal_distance: float) -> float:
@@ -431,6 +480,7 @@ func _step_episode(action_value: Variant) -> void:
 	remaining_physics_ticks = ACTION_REPEAT
 	step_in_progress = true
 	await action_completed
+	ego.get_node("SensorRig").call("update_sensors")
 	episode_steps += 1
 
 	var state := _get_route_state()
@@ -450,8 +500,7 @@ func _step_episode(action_value: Variant) -> void:
 		float(state["half_width"]) - vehicle_half_width,
 		1.0
 	)
-	var edge_ratio := absf(float(state["lateral_offset"])) / safe_half_width
-	var edge_pressure := clampf((edge_ratio - 0.55) / 0.45, 0.0, 1.0)
+	var edge_pressure := _edge_pressure(float(state["lateral_offset"]), _lane_center_offset_at(current_progress), safe_half_width)
 	var heading_ratio := clampf(absf(float(state["heading_error"])) / (PI * 0.5), 0.0, 1.0)
 	# Progress shaping is intentionally bounded: completing the route must be
 	# worth more than accumulating distance before leaving the pavement.
@@ -510,9 +559,21 @@ func _step_episode(action_value: Variant) -> void:
 			"episode_steps": episode_steps,
 			"physics_ticks": episode_physics_ticks,
 			"stalled": idle_steps >= 150,
+			"speed_kmh": float(ego.get("current_speed")) * 0.3,
+			"speed_cap_kmh": float(ego.get("max_speed")) * 0.3,
+			"progress_fraction": clampf((current_progress - start_progress) / maxf(episode_goal_distance, 1.0), 0.0, 1.0),
+			"reset_ms": episode_reset_ms,
+			"map_attempts": episode_map_attempts,
+			"map_reused": map_episodes > 1,
 			"training_state": _training_state()
 		}
 	})
+
+
+func _edge_pressure(lateral_offset: float, target_offset: float, safe_half_width: float) -> float:
+	var safe_target := minf(absf(target_offset), maxf(0.0, safe_half_width - 1.0))
+	var onset := maxf(safe_target, safe_half_width * 0.7)
+	return clampf((absf(lateral_offset) - onset) / maxf(safe_half_width - onset, 1.0), 0.0, 1.0)
 
 
 func _max_speed_bonus(progress_delta: float, off_road: bool) -> float:
@@ -527,12 +588,14 @@ func _max_speed_bonus(progress_delta: float, off_road: bool) -> float:
 
 
 func _record_curriculum_outcome(success: bool) -> void:
-	if not curriculum_enabled or curriculum_stage >= GOAL_DISTANCE_STAGES.size() - 1:
+	if not curriculum_enabled or active_episode_stage != curriculum_stage:
 		return
 	curriculum_recent_results.append(success)
 	if curriculum_recent_results.size() > CURRICULUM_WINDOW:
 		curriculum_recent_results.pop_front()
 	if curriculum_recent_results.size() < CURRICULUM_WINDOW:
+		return
+	if curriculum_stage >= GOAL_DISTANCE_STAGES.size() - 1:
 		return
 	var successes := 0
 	for result in curriculum_recent_results:
@@ -540,7 +603,10 @@ func _record_curriculum_outcome(success: bool) -> void:
 			successes += 1
 	var success_rate := float(successes) / float(curriculum_recent_results.size())
 	if success_rate >= CURRICULUM_ADVANCE_RATE:
-		curriculum_stage += 1
+		if curriculum_stage == 3 and turn_level < 2:
+			turn_level += 1
+		else:
+			curriculum_stage += 1
 		curriculum_recent_results.clear()
 		print(
 			"[PPO curriculum] advanced to stage %d after %.0f%% success over %d episodes"
@@ -560,7 +626,6 @@ func _physics_process(delta: float) -> void:
 		brake = 0.0
 	ego.set_control(throttle, brake, steering)
 	ego.call("_physics_process", delta)
-	ego.get_node("SensorRig").call("update_sensors")
 	episode_physics_ticks += 1
 	remaining_physics_ticks -= 1
 	if remaining_physics_ticks == 0:
@@ -573,13 +638,14 @@ func _goal_reached(progress: float) -> bool:
 
 
 func _training_state() -> Dictionary:
-	return {"curriculum_stage": curriculum_stage, "recent_results": curriculum_recent_results.duplicate()}
+	return {"curriculum_stage": curriculum_stage, "turn_level": turn_level, "recent_results": curriculum_recent_results.duplicate()}
 
 
 func _restore_training_state(value: Variant) -> void:
 	if not value is Dictionary:
 		return
 	curriculum_stage = clampi(int(value.get("curriculum_stage", 0)), 0, GOAL_DISTANCE_STAGES.size() - 1)
+	turn_level = clampi(int(value.get("turn_level", 2 if curriculum_stage > 3 else 0)), 0, 2)
 	curriculum_recent_results.clear()
 	for result in value.get("recent_results", []).slice(-CURRICULUM_WINDOW):
 		curriculum_recent_results.append(bool(result))
@@ -640,7 +706,7 @@ func _get_observation() -> Array[float]:
 	var sensors: Node = ego.get_node("SensorRig")
 	for distance in sensors.call("get_observation"):
 		result.append(clampf(float(distance), 0.0, 1.0))
-	result.append(clampf(float(ego.get("current_speed")) / float(ego.get("max_speed")), -1.0, 1.0))
+	result.append(clampf(float(ego.get("current_speed")) / base_max_speed, -1.0, 1.0))
 	result.append(clampf(float(ego.get("steering_input")), -1.0, 1.0))
 	result.append(clampf(float(state["heading_error"]) / PI, -1.0, 1.0))
 	result.append(clampf(float(state["lane_error"]) / route.lane_width, -1.0, 1.0))

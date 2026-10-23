@@ -48,6 +48,14 @@ class EnvironmentStateTests(unittest.TestCase):
             env.reset(seed=10)
         self.assertEqual(env.bridge.request.call_count, 1)
 
+    def test_only_unseeded_training_can_reuse_a_map(self) -> None:
+        env = self.make_env()
+        env.bridge.request.return_value = reset_response()
+        env.reset()
+        self.assertTrue(env.bridge.request.call_args.args[0]["options"]["reuse_map"])
+        env.reset(seed=10, options={"reuse_map": True, "curriculum": False})
+        self.assertFalse(env.bridge.request.call_args.args[0]["options"]["reuse_map"])
+
     def test_retry_limit_preserves_failure(self) -> None:
         env = self.make_env()
         env.bridge.request.side_effect = ResetUnavailableError("unavailable")
@@ -68,6 +76,7 @@ class EnvironmentStateTests(unittest.TestCase):
         message = env.bridge.request.call_args.args[0]
         self.assertEqual(message["seed"], expected_seed)
         self.assertEqual(message["options"]["training_state"], curriculum)
+        self.assertFalse(message["options"]["reuse_map"])
         env.reset()
         self.assertNotIn("training_state", env.bridge.request.call_args.args[0]["options"])
 

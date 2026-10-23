@@ -28,8 +28,22 @@ func _run_test() -> void:
 	var config: Dictionary = settings.call("_training_config")
 	if int(config.get("workers", 0)) != 1 or int(config.get("steps", 0)) != 1000000 \
 	or float(config.get("reward_config", {}).get("crash_penalty", 0.0)) != 35.0 \
-	or float(config.get("reward_config", {}).get("max_speed_reward", 0.0)) != 0.05:
+	or float(config.get("reward_config", {}).get("max_speed_reward", -1.0)) != 0.0 \
+	or not is_equal_approx(float(config.get("gamma", 0)), 0.999) \
+	or int(config.get("eval_episodes", 0)) != 64:
 		push_error("Training tab defaults do not match the existing PPO trainer.")
+		quit(1)
+		return
+	var dashboard: Node = settings.get("training_dashboard")
+	settings.call("_on_training_status_changed", {"state": "running", "timesteps": 1000, "total_steps": 10000,
+		"phase": "evaluating", "performance": {"steps_per_second": 400.0, "elapsed_seconds": 30.0, "eta_seconds": 20.0},
+		"training_metrics": {"episodes": 20, "success_rate": 0.65, "crash_rate": 0.2, "mean_return": 12.0},
+		"worker_metrics": [{"worker": 1, "stage": 3, "episode_stage": 3, "turn_level": 1}],
+		"evaluation_progress": {"completed": 8, "total": 64, "workers": 4},
+		"last_evaluation": {"stages": [{"stage": 3, "episodes": 8, "successes": 5, "success_rate": 0.625, "success_interval": [0.3, 0.9]}]}})
+	if dashboard == null or dashboard.get("metric_labels")["train_success"].text != "65.0%" \
+	or not dashboard.get("context_label").text.contains("8 / 64"):
+		push_error("Dashboard does not display live and evaluation information separately.")
 		quit(1)
 		return
 	var controller := settings.get_node("AiTrainingController")

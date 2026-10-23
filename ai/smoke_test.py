@@ -62,7 +62,8 @@ def main() -> None:
         repeated_reset = bridge.request({"type": "reset", "seed": arguments.seed})
         if repeated_reset["observation"] != observation:
             raise RuntimeError("Resetting with the same seed changed the initial observation")
-        if repeated_reset["info"] != reset_result["info"]:
+        stable = lambda info: {k: v for k, v in info.items() if k != "reset_ms"}
+        if stable(repeated_reset["info"]) != stable(reset_result["info"]):
             raise RuntimeError("Resetting with the same seed changed episode route metadata")
         print("DETERMINISM PASS: same seed reproduces the route and initial observation")
 

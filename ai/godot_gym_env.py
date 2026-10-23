@@ -13,7 +13,7 @@ from godot_bridge import GodotBridge, ResetUnavailableError
 
 OBSERVATION_SIZE = 31
 ACTION_SIZE = 2
-ENVIRONMENT_VERSION = 2
+ENVIRONMENT_VERSION = 3
 
 
 class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
@@ -58,6 +58,7 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         reset_options = dict(options or {})
         reset_options["reward_config"] = self.reward_config
+        reset_options["reuse_map"] = seed is None and not restoring
         if self._pending_training_state is not None:
             reset_options["training_state"] = self._pending_training_state
         # Evaluation uses an exact seed and must expose an invalid map rather

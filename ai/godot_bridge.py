@@ -73,7 +73,7 @@ class GodotBridge:
         port = listener.getsockname()[1]
         command = [godot]
         if not visible:
-            command.append("--headless")
+            command.extend(["--headless", "--fixed-fps", "60", "--disable-render-loop"])
         command.extend(
             [
                 "--path",
@@ -97,6 +97,7 @@ class GodotBridge:
                 stderr=subprocess.STDOUT,
             )
             connection, _address = listener.accept()
+            connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             connection.settimeout(startup_timeout)
             self._socket = connection
         except Exception:

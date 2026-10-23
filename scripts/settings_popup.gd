@@ -1,9 +1,10 @@
 extends CanvasLayer
 
+const TRAINING_DASHBOARD_SCRIPT := preload("res://scripts/training_dashboard.gd")
 const TRAINING_CONTROLLER_SCRIPT := preload("res://scripts/ai_training_controller.gd")
 const REWARD_FIELDS := [
 	["progress_gain", "Forward progress reward", 1.0],
-	["max_speed_reward", "Top-speed reward (per step)", 0.05],
+	["max_speed_reward", "Top-speed reward (per step)", 0.0],
 	["lane_penalty", "Lane deviation penalty", 0.12],
 	["edge_penalty", "Road-edge penalty", 0.6],
 	["heading_penalty", "Wrong-heading penalty", 0.08],
@@ -36,6 +37,8 @@ var close_button: Button
 var map_notice: PanelContainer
 var map_notice_label: Label
 var map_notice_timer: Timer
+var training_dashboard: VBoxContainer
+var settings_panel: PanelContainer
 var training_controller: Node
 var training_inputs: Dictionary = {}
 var reward_inputs: Dictionary = {}
@@ -148,11 +151,9 @@ func _build_interface() -> void:
 	var panel := PanelContainer.new()
 	panel.name = "SettingsPanel"
 	panel.set_anchors_preset(Control.PRESET_CENTER)
-	panel.offset_left = -300.0
-	panel.offset_top = -316.0
-	panel.offset_right = 300.0
-	panel.offset_bottom = 316.0
-	panel.custom_minimum_size = Vector2(600.0, 0.0)
+	settings_panel = panel
+	_fit_settings_panel()
+	get_viewport().size_changed.connect(_fit_settings_panel)
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	var panel_style := StyleBoxFlat.new()
 	panel_style.bg_color = Color(0.035, 0.065, 0.08, 0.98)
@@ -185,7 +186,8 @@ func _build_interface() -> void:
 
 	var tabs := TabContainer.new()
 	tabs.name = "SettingsTabs"
-	tabs.custom_minimum_size = Vector2(0.0, 475.0)
+	tabs.custom_minimum_size = Vector2(0.0, 260.0)
+	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	layout.add_child(tabs)
 	var main_scroll := ScrollContainer.new()
@@ -361,32 +363,23 @@ func _build_training_tab(tabs: TabContainer) -> void:
 	training_tab.add_theme_constant_override("separation", 8)
 	tabs.add_child(training_tab)
 
-	training_status_label = Label.new()
-	training_status_label.name = "TrainingStatus"
-	training_status_label.text = "No training run active. Configure PPO below, then press Start."
-	training_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	training_status_label.custom_minimum_size.y = 38.0
-	training_tab.add_child(training_status_label)
-	training_progress = ProgressBar.new()
-	training_progress.name = "TrainingProgress"
-	training_progress.show_percentage = false
-	training_progress.custom_minimum_size.y = 17.0
-	training_tab.add_child(training_progress)
-
-	var actions := HBoxContainer.new()
-	training_tab.add_child(actions)
+	var dashboard := TRAINING_DASHBOARD_SCRIPT.new()
+	dashboard.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	training_tab.add_child(dashboard)
+	training_dashboard = dashboard
+	training_status_label = dashboard.status_label
+	training_progress = dashboard.progress
+	var actions: HBoxContainer = dashboard.actions
 	training_start_button = _training_action(actions, "Start training", _on_training_start_pressed)
 	training_pause_button = _training_action(actions, "Pause", _on_training_pause_pressed)
 	training_resume_button = _training_action(actions, "Resume", _on_training_resume_pressed)
 	training_stop_button = _training_action(actions, "End and save", _on_training_stop_pressed)
-
-	var scroll := ScrollContainer.new()
-	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	training_tab.add_child(scroll)
-	var fields := VBoxContainer.new()
-	fields.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	fields.add_theme_constant_override("separation", 7)
-	scroll.add_child(fields)
+	var primary := StyleBoxFlat.new()
+	primary.bg_color = Color("267966")
+	primary.set_corner_radius_all(6)
+	training_start_button.add_theme_stylebox_override("normal", primary)
+	training_stop_button.add_theme_color_override("font_color", Color("ffa7a7"))
+	var fields: VBoxContainer = dashboard.setup_fields
 	_training_section(fields, "PROCESS AND MODEL")
 	var python_relative := "res://.venv-ai/Scripts/python.exe" if OS.get_name() == "Windows" else "res://.venv-ai/bin/python"
 	var python_default := ProjectSettings.globalize_path(python_relative)
@@ -398,14 +391,16 @@ func _build_training_tab(tabs: TabContainer) -> void:
 	training_inputs["workers"] = _training_number_field(fields, "Parallel Godot workers", 1, 32, 1, 1)
 	training_inputs["steps"] = _training_number_field(fields, "Total training timesteps", 1024, 50000000, 1, 1000000)
 	training_inputs["seed"] = _training_number_field(fields, "Training seed", 1, 2147483646, 1, 7)
+	training_inputs["torch_threads"] = _training_number_field(fields, "PPO CPU threads", 1, 32, 1, 1)
+	training_inputs["eval_workers"] = _training_number_field(fields, "Parallel evaluation worlds", 1, 16, 1, 4)
 	_training_section(fields, "PPO AND EVALUATION")
 	training_inputs["learning_rate"] = _training_number_field(fields, "Learning rate", 0.000001, 0.01, 0.000001, 0.0003)
 	training_inputs["batch_size"] = _training_number_field(fields, "PPO batch size", 16, 1024, 16, 64)
-	training_inputs["gamma"] = _training_number_field(fields, "Discount factor (gamma)", 0.8, 0.9999, 0.0001, 0.995)
+	training_inputs["gamma"] = _training_number_field(fields, "Discount factor (gamma)", 0.8, 0.9999, 0.0001, 0.999)
 	training_inputs["entropy_coefficient"] = _training_number_field(fields, "Entropy coefficient", 0.0, 0.2, 0.001, 0.01)
 	training_inputs["checkpoint_every"] = _training_number_field(fields, "Checkpoint interval (steps)", 1, 5000000, 1, 10240)
 	training_inputs["eval_every"] = _training_number_field(fields, "Evaluation interval (0 disables)", 0, 5000000, 1000, 50000)
-	training_inputs["eval_episodes"] = _training_number_field(fields, "Episodes per evaluation", 8, 256, 1, 16)
+	training_inputs["eval_episodes"] = _training_number_field(fields, "Episodes per evaluation", 8, 256, 8, 64)
 	training_inputs["success_threshold"] = _training_number_field(fields, "Early-stop success threshold", 0.0, 1.0, 0.01, 0.9)
 	training_inputs["early_stop_patience"] = _training_number_field(fields, "Successful evaluations to stop (0 disables)", 0, 20, 1, 3)
 	_training_section(fields, "REWARD AND PENALTY WEIGHTS")
@@ -514,15 +509,10 @@ func _on_training_status_changed(status: Dictionary) -> void:
 	var steps := int(status.get("timesteps", 0))
 	var total := maxi(int(status.get("total_steps", 1)), 1)
 	var message := String(status.get("message", "Configure PPO, then press Start training."))
-	training_status_label.text = "%s · %d / %d steps · %s" % [state.capitalize(), steps, total, message]
+	training_status_label.text = message
+	training_dashboard.call("update_status", status)
 	if state == "failed" and status.has("log_path"):
 		training_status_label.text += "\nLog: " + String(status["log_path"])
-	var evaluation: Dictionary = status.get("last_evaluation", {})
-	if not evaluation.is_empty():
-		training_status_label.text += "\nLast evaluation: %.0f%% success, %.0f%% crash." % [
-			float(evaluation.get("success_rate", 0.0)) * 100.0,
-			float(evaluation.get("crash_rate", 0.0)) * 100.0
-		]
 	training_progress.max_value = total
 	training_progress.value = mini(steps, total)
 	training_start_button.disabled = active
@@ -582,3 +572,15 @@ func _on_gear_pressed() -> void:
 			set_popup_open(false)
 	else:
 		set_popup_open(true)
+
+
+func _fit_settings_panel() -> void:
+	if settings_panel == null:
+		return
+	var available := get_viewport().get_visible_rect().size - Vector2(40, 40)
+	var width := minf(1080.0, maxf(320.0, available.x))
+	var height := minf(820.0, maxf(360.0, available.y))
+	settings_panel.offset_left = -width * 0.5
+	settings_panel.offset_right = width * 0.5
+	settings_panel.offset_top = -height * 0.5
+	settings_panel.offset_bottom = height * 0.5
