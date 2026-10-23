@@ -112,6 +112,16 @@ coverage, then overall success, crash/off-road rates, and return. Logs, CSV
 summaries and detailed per-stage evaluation JSON go under `ai/runs/`, while
 models and periodic checkpoints go under `ai/models/`.
 
+## Standalone training GUI
+
+Double-click `start_training_gui.cmd` after running `setup_ai_training.cmd`.
+The standalone app provides a shared run setup, training dashboard, model
+presentation, and a live grid of every training worker on Windows. Eight
+workers produce eight actual Godot views. See
+[AI Training Studio](../enhanced_training_gui/README.md) for controls,
+resume behavior and requirements. Visual training uses more GPU resources and
+runs slower than headless training.
+
 ## Train from the Godot GUI
 
 On a new Windows computer, install Python 3.10+ and Godot 4, then double-click
@@ -132,6 +142,12 @@ executable by default; edit either path if your installation differs.
 Open **Run setup** to set the worker count (each worker launches one headless Godot world), total
 timesteps, seed, PPO parameters, checkpoint/evaluation intervals, early-stop
 threshold, and reward/penalty weights before pressing **Start training**.
+
+The training worker count has no configured upper cap and defaults to 1.
+Selecting more than 32 displays a warning about CPU/RAM usage and possible
+slowdowns or memory exhaustion; the warning does not block starting training.
+When resuming a checkpoint, keep its original worker count.
+
 **Pause** waits for the current environment step, **Resume** continues, and
 **End and save** stops cleanly and saves the latest policy. **Overview** shows
 steps/second, elapsed time and training ETA, recent success/crash/stall/timeout,

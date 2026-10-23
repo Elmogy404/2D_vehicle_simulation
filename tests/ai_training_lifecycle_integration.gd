@@ -17,6 +17,11 @@ func _run_test() -> void:
 	controller.set("status_resource_path", "res://ai/runs/gui_lifecycle_test_output/status.json")
 	controller.set("control_resource_path", "res://ai/runs/gui_lifecycle_test_output/control.json")
 	root.add_child(controller)
+	# An already-open dashboard must notice a trainer another GUI launches.
+	var observer := CONTROLLER_SCRIPT.new() as Node
+	observer.set("status_resource_path", controller.get("status_resource_path"))
+	observer.set("control_resource_path", controller.get("control_resource_path"))
+	root.add_child(observer)
 	var config := {
 		"python_path": ProjectSettings.globalize_path("res://.venv-ai/Scripts/python.exe"),
 		"godot_path": OS.get_executable_path(),
@@ -42,6 +47,13 @@ func _run_test() -> void:
 		push_error("PPO did not enter running state: " + str(controller.get("latest_status")))
 		quit(1)
 		return
+	if not await _wait_for_state(observer, "running", 30000) or not observer.call("is_training_active") \
+	or not String(observer.call("start_training", config)).contains("already running"):
+		controller.call("stop_training")
+		push_error("An already-open dashboard did not adopt/protect the external training run.")
+		quit(1)
+		return
+	observer.queue_free()
 	if not controller.call("pause_training") or not await _wait_for_state(controller, "paused", 30000):
 		controller.call("stop_training")
 		push_error("PPO did not pause: " + str(controller.get("latest_status")))

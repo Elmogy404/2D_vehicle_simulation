@@ -65,13 +65,18 @@ can resume with their original run name, worker count, and saved settings.
 
 ## Validation
 
+- The standalone training GUI embeds every visual worker in a native Windows
+  grid. The eight-worker desktop test passed distinct live-window checks,
+  pause/resume, save/stop, child cleanup, visual-to-headless checkpoint resume,
+  and model presentation/stop. Its actual rendered grid was inspected.
 - Two independent 160-episode sweeps: zero invalid spawn/reference/goal poses
   across all eight stages; alternative maps selected in 16 and 12 episodes.
 - Independent controller reached goals at stages 0, 3 and 7 in 69, 228 and
   1,302 actions respectively. Fixed four-tick stepping and idle stability pass.
 - Six headless/visual comparisons: identical colliders, graph, selected route,
   observations, rewards and trajectories. Eight-episode map reuse/refresh passed.
-- All 23 Python tests passed, covering reset recovery, version/resume guards, real PPO checkpoint
+- All 32 Python tests passed, covering Godot editor-path discovery and presentation setup,
+  reset recovery, version/resume guards, real PPO checkpoint
   callbacks, failure recovery, timeout telemetry, binomial intervals, external
   process detection, and exact seed/stage accounting with unequal parallel
   episode lengths. Single- and four-worker evaluation results match.

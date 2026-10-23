@@ -47,6 +47,7 @@ def main() -> None:
         help="Goal-distance tier to monitor (0=shortest, 7=longest)",
     )
     parser.add_argument("--godot", help="Godot 4 executable; defaults to GODOT_BIN/PATH")
+    parser.add_argument("--stop-file", help="GUI-owned watch session: stop when this file exists and close its Godot window")
     arguments = parser.parse_args()
     if arguments.curriculum_stage not in range(8):
         parser.error("--curriculum-stage must be from 0 to 7")
@@ -57,7 +58,8 @@ def main() -> None:
     if model_path.suffix != ".zip":
         model_path = model_path.with_suffix(".zip")
     model = load_model(model_path)
-    env = GodotRoadEnv(arguments.godot, visible=True)
+    env = GodotRoadEnv(arguments.godot, visible=True, close_visible_on_exit=bool(arguments.stop_file))
+    stop_file = Path(arguments.stop_file) if arguments.stop_file else None
     episode = 0
     successes = 0
     crashes = 0
@@ -70,7 +72,7 @@ def main() -> None:
     )
 
     try:
-        while True:
+        while not (stop_file and stop_file.exists()):
             seed = arguments.seed + episode
             observation, _info = env.reset(
                 seed=seed,
@@ -83,6 +85,8 @@ def main() -> None:
             steps = 0
             final_info: dict[str, object] = {}
             while True:
+                if stop_file and stop_file.exists():
+                    return
                 action, _state = model.predict(observation, deterministic=True)
                 observation, reward, terminated, truncated, final_info = env.step(action)
                 episode_return += float(reward)

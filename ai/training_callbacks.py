@@ -45,6 +45,7 @@ class TrainingObserver(BaseCallback):
                 "progress": info.get("progress_fraction", 0), "speed_kmh": info.get("speed_kmh", 0),
                 "speed_cap_kmh": info.get("speed_cap_kmh", 150), "reset_ms": info.get("reset_ms", 0),
                 "map_reused": info.get("map_reused", False), "map_attempts": info.get("map_attempts", 0),
+                "godot_pid": info.get("godot_pid"),
             }
             if done:
                 episode = info.get("episode", {})

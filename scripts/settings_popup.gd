@@ -2,6 +2,7 @@ extends CanvasLayer
 
 const TRAINING_DASHBOARD_SCRIPT := preload("res://scripts/training_dashboard.gd")
 const TRAINING_CONTROLLER_SCRIPT := preload("res://scripts/ai_training_controller.gd")
+const WORKER_WARNING_THRESHOLD := 32
 const REWARD_FIELDS := [
 	["progress_gain", "Forward progress reward", 1.0],
 	["max_speed_reward", "Top-speed reward (per step)", 0.0],
@@ -48,6 +49,7 @@ var training_start_button: Button
 var training_pause_button: Button
 var training_resume_button: Button
 var training_stop_button: Button
+var training_worker_warning: Label
 
 
 func _ready() -> void:
@@ -388,7 +390,18 @@ func _build_training_tab(tabs: TabContainer) -> void:
 	training_inputs["run_name"] = _training_text_field(fields, "Run name (blank = new timestamped run)", "")
 	training_inputs["resume_path"] = _training_text_field(fields, "Resume checkpoint (.zip, optional)", "")
 	training_inputs["output_root"] = _training_text_field(fields, "Output folder (blank = project ai/)", "")
-	training_inputs["workers"] = _training_number_field(fields, "Parallel Godot workers", 1, 32, 1, 1)
+	var workers := _training_number_field(fields, "Parallel Godot workers", 1, WORKER_WARNING_THRESHOLD, 1, 1)
+	workers.allow_greater = true
+	training_inputs["workers"] = workers
+	training_worker_warning = Label.new()
+	training_worker_warning.name = "TrainingWorkerWarning"
+	training_worker_warning.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	training_worker_warning.add_theme_color_override("font_color", Color("efc475"))
+	training_worker_warning.add_theme_font_size_override("font_size", 12)
+	dashboard.add_child(training_worker_warning)
+	dashboard.move_child(training_worker_warning, training_status_label.get_index() + 1)
+	workers.value_changed.connect(_on_training_worker_count_changed)
+	_on_training_worker_count_changed(workers.value)
 	training_inputs["steps"] = _training_number_field(fields, "Total training timesteps", 1024, 50000000, 1, 1000000)
 	training_inputs["seed"] = _training_number_field(fields, "Training seed", 1, 2147483646, 1, 7)
 	training_inputs["torch_threads"] = _training_number_field(fields, "PPO CPU threads", 1, 32, 1, 1)
@@ -413,6 +426,11 @@ func _build_training_tab(tabs: TabContainer) -> void:
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	note.add_theme_font_size_override("font_size", 11)
 	fields.add_child(note)
+
+
+func _on_training_worker_count_changed(value: float) -> void:
+	training_worker_warning.visible = value > WORKER_WARNING_THRESHOLD
+	training_worker_warning.text = "Warning: %d workers selected. Using more than %d workers can use a lot of CPU and RAM, slow training, or run out of memory. You can still start training." % [int(value), WORKER_WARNING_THRESHOLD]
 
 
 func _training_action(parent: HBoxContainer, title: String, handler: Callable) -> Button:

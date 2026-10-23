@@ -27,6 +27,8 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
         *,
         visible: bool = False,
         reward_config: dict[str, float] | None = None,
+        parent_window_id: int | None = None,
+        close_visible_on_exit: bool = False,
     ) -> None:
         super().__init__()
         self.action_space = spaces.Box(
@@ -39,7 +41,9 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
             high=np.full(OBSERVATION_SIZE, 1.0, dtype=np.float32),
             dtype=np.float32,
         )
-        self.bridge = GodotBridge(godot_executable, visible=visible)
+        self.bridge = GodotBridge(godot_executable, visible=visible,
+                                  parent_window_id=parent_window_id,
+                                  close_visible_on_exit=close_visible_on_exit)
         self.reward_config = dict(reward_config or {})
         self._pending_training_state: dict[str, Any] | None = None
 
@@ -79,6 +83,7 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
         self._validate_observation(observation)
         info = dict(response.get("info", {}))
         info.update(requested_seed=episode_seed, reset_retries=attempt)
+        info["godot_pid"] = self.bridge.process_id
         return observation, info
 
     def get_training_state(self) -> dict[str, Any]:
@@ -108,7 +113,7 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
             float(response["reward"]),
             bool(response["terminated"]),
             bool(response["truncated"]),
-            dict(response.get("info", {})),
+            dict(response.get("info", {}), godot_pid=self.bridge.process_id),
         )
 
     def close(self) -> None:

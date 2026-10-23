@@ -41,8 +41,15 @@ func _process(delta: float) -> void:
 		return
 	poll_remaining = 0.5
 	var status := _read_status()
+	if not status.is_empty() and String(status.get("run_id", "")) != run_id and not is_training_active():
+		_adopt_external_status(status)
 	if not status.is_empty() and String(status.get("run_id", "")) == run_id:
 		latest_status = status
+		if not owns_process and String(status.get("state", "")) in ["starting", "running", "paused", "stopping", "saving"]:
+			var current_pid := int(status.get("pid", -1))
+			if current_pid != process_id:
+				process_id = current_pid
+				process_check_at = -2000
 	if process_id > 0 and not _process_is_running():
 		process_id = -1
 		if String(latest_status.get("state", "")) not in ["completed", "stopped", "failed"]:
@@ -54,6 +61,14 @@ func _process(delta: float) -> void:
 
 func is_training_active() -> bool:
 	return process_id > 0 and _process_is_running()
+
+
+func _adopt_external_status(status: Dictionary) -> void:
+	latest_status = status
+	run_id = String(status.get("run_id", ""))
+	process_id = int(status.get("pid", -1)) if String(status.get("state", "")) in ["starting", "running", "paused", "stopping", "saving"] else -1
+	owns_process = false
+	process_check_at = -2000
 
 
 func _process_is_running() -> bool:
@@ -75,6 +90,11 @@ func _process_is_running() -> bool:
 func start_training(config: Dictionary) -> String:
 	if is_training_active():
 		return "A training process is already running. Stop it before starting another."
+	var external := _read_status()
+	if not external.is_empty() and String(external.get("run_id", "")) != run_id:
+		_adopt_external_status(external)
+		if is_training_active():
+			return "A training process is already running. Stop it before starting another."
 	var runs_path := ProjectSettings.globalize_path("res://ai/runs")
 	if DirAccess.make_dir_recursive_absolute(runs_path) != OK:
 		return "Could not create the project ai/runs folder for training status."

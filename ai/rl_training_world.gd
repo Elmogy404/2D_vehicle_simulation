@@ -74,6 +74,8 @@ var episode_goal_distance := 0.0
 var episode_route_turns := 0
 var episode_turn_requirement_met := true
 var visible_mode := false
+var owned_training_view := false
+var embedded_training_view := false
 var reward_config: Dictionary = DEFAULT_REWARD_CONFIG.duplicate()
 var trip_rejections: Dictionary = {}
 var episode_map_attempts := 0
@@ -88,8 +90,10 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_parse_port_argument()
 	visible_mode = OS.get_cmdline_user_args().has("--visible")
+	owned_training_view = OS.get_cmdline_user_args().has("--owned-training-view")
+	embedded_training_view = OS.get_cmdline_user_args().has("--embedded-training-view")
 	_setup_training_world()
-	if visible_mode:
+	if visible_mode and not embedded_training_view:
 		_setup_monitor_hud()
 	# Static worlds keep running; only this node advances the car, and only
 	# while a requested action is pending. Pausing at physics_frame signals
@@ -234,7 +238,7 @@ func _handle_request(line: String) -> void:
 		"close":
 			_send_message({"closed": true})
 			request_busy = false
-			if not visible_mode:
+			if not visible_mode or owned_training_view:
 				get_tree().quit()
 			return
 		_:
@@ -735,7 +739,7 @@ func _send_message(message: Dictionary) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if visible_mode and event is InputEventKey and event.pressed \
+	if visible_mode and not embedded_training_view and event is InputEventKey and event.pressed \
 	and not event.echo and event.keycode == KEY_ESCAPE:
 		get_tree().quit()
 

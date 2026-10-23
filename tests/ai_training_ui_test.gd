@@ -35,6 +35,28 @@ func _run_test() -> void:
 		quit(1)
 		return
 	var dashboard: Node = settings.get("training_dashboard")
+	var workers: SpinBox = settings.get("training_inputs")["workers"]
+	var warning: Label = settings.get("training_worker_warning")
+	var start_button: Button = settings.get("training_start_button")
+	var was_disabled := start_button.disabled
+	workers.value = 32
+	if warning.visible:
+		push_error("Worker warning must be hidden at 32 workers.")
+		quit(1)
+		return
+	for count in [33, 128]:
+		workers.value = count
+		var large_config: Dictionary = settings.call("_training_config")
+		if int(large_config["workers"]) != count or not warning.visible \
+		or not warning.text.contains("32") or start_button.disabled != was_disabled:
+			push_error("Counts above 32 must remain usable with a non-blocking warning.")
+			quit(1)
+			return
+	workers.value = 0
+	if int(workers.value) != 1 or warning.visible:
+		push_error("Worker count must retain its minimum of 1 and clear the warning.")
+		quit(1)
+		return
 	settings.call("_on_training_status_changed", {"state": "running", "timesteps": 1000, "total_steps": 10000,
 		"phase": "evaluating", "performance": {"steps_per_second": 400.0, "elapsed_seconds": 30.0, "eta_seconds": 20.0},
 		"training_metrics": {"episodes": 20, "success_rate": 0.65, "crash_rate": 0.2, "mean_return": 12.0},
@@ -52,5 +74,5 @@ func _run_test() -> void:
 		push_error("The Training tab is not connected to process controls.")
 		quit(1)
 		return
-	print("AI TRAINING UI TEST PASSED: two tabs, PPO defaults, rewards, and process controls are present.")
+	print("AI TRAINING UI TEST PASSED: defaults, telemetry, uncapped workers, warning threshold, and process controls.")
 	quit(0)

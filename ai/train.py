@@ -36,10 +36,14 @@ def load_sb3_checkpoint(path: str, env: object) -> object:
         return PPO.load(path, env=env, device="cpu")
 
 
-def make_training_env(godot_executable: str | None, reward_config: dict[str, float]) -> object:
+def make_training_env(godot_executable: str | None, reward_config: dict[str, float], *,
+                      parent_window_id: int | None = None) -> object:
     from stable_baselines3.common.monitor import Monitor
 
-    return Monitor(GodotRoadEnv(godot_executable, reward_config=reward_config))
+    if parent_window_id is None:
+        return Monitor(GodotRoadEnv(godot_executable, reward_config=reward_config))
+    return Monitor(GodotRoadEnv(godot_executable, reward_config=reward_config, visible=True,
+                               parent_window_id=parent_window_id, close_visible_on_exit=True))
 
 
 def capture_training_state(model: object) -> None:
@@ -115,7 +119,18 @@ def main() -> None:
     parser.add_argument("--gui-log-path", default="", help="Log path displayed by the Godot training GUI")
     parser.add_argument("--run-id", default="cli", help="Unique ID guarding GUI control commands")
     parser.add_argument("--output-root", help="Directory for models and evaluation logs; defaults to ai/")
+    parser.add_argument("--visual-parents", help="JSON file listing one native GUI parent window ID per training worker")
     arguments = parser.parse_args()
+    visual_parents = None
+    if arguments.visual_parents:
+        try:
+            visual_parents = json.loads(Path(arguments.visual_parents).read_text(encoding="utf-8"))
+            if (not isinstance(visual_parents, list) or len(visual_parents) != arguments.n_envs
+                    or any(type(x) is not int or x <= 0 for x in visual_parents)
+                    or len(set(visual_parents)) != len(visual_parents)):
+                raise ValueError("provide one distinct positive window ID per training worker")
+        except (OSError, ValueError) as error:
+            parser.error(f"Invalid --visual-parents: {error}")
     if arguments.reward_config and arguments.reward_config_file:
         parser.error("use either --reward-config or --reward-config-file, not both")
     try:
@@ -133,6 +148,12 @@ def main() -> None:
         parser.error("--steps must be at least 1")
     if arguments.n_envs < 1:
         parser.error("--n-envs must be at least 1")
+    if arguments.n_envs > 32:
+        print(
+            f"Warning: {arguments.n_envs} workers selected. More than 32 workers "
+            "can use a lot of CPU and RAM, slow training, or run out of memory. "
+            "Training is still allowed.", flush=True,
+        )
     if not 0.0 < arguments.learning_rate <= 0.01:
         parser.error("--learning-rate must be positive and at most 0.01")
     if arguments.batch_size < 1:
@@ -199,6 +220,7 @@ def main() -> None:
         arguments.n_envs,
         arguments.gui_log_path,
     )
+    control.metrics["visual_training"] = visual_parents is not None
     control.write_status("starting", 0, "Starting training worlds")
     # Align the rollout with whole minibatches, including worker counts such as six.
     rollout_steps = max(128, 1024 // arguments.n_envs)
@@ -206,9 +228,12 @@ def main() -> None:
     rollout_steps = ((rollout_steps + alignment - 1) // alignment) * alignment
     try:
         if arguments.n_envs == 1:
-            env = make_training_env(arguments.godot, reward_config)
+            env = (make_training_env(arguments.godot, reward_config, parent_window_id=visual_parents[0])
+                   if visual_parents else make_training_env(arguments.godot, reward_config))
         else:
             env = SubprocVecEnv(
+                [partial(make_training_env, arguments.godot, reward_config, parent_window_id=parent)
+                 for parent in visual_parents] if visual_parents else
                 [partial(make_training_env, arguments.godot, reward_config) for _ in range(arguments.n_envs)],
                 start_method="spawn",
             )
