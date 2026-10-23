@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,30 @@ DEFAULT_REWARD_CONFIG: dict[str, float] = {
     "goal_reward": 40.0,
     "timeout_penalty": 20.0,
 }
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any], *, attempts: int = 6) -> None:
+    """Publish complete JSON, allowing Windows readers time to close the file."""
+    content = json.dumps(payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    try:
+        for attempt in range(attempts):
+            try:
+                temporary.write_text(content, encoding="utf-8")
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                # A Godot/antivirus reader may briefly deny delete sharing.
+                # Retain the old complete status until replacement succeeds.
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(min(0.005 * 2**attempt, 0.05))
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def parse_reward_config(raw: str | None) -> dict[str, float]:
@@ -72,13 +97,14 @@ class TrainingControl:
         self.last_command_time = 0.0
         self.cached_command = "run"
         self.paused_seconds = 0.0
+        self.last_status_warning = float("-inf")
 
-    def write_status(self, state: str, timesteps: int, message: str = "") -> None:
+    def write_status(self, state: str, timesteps: int, message: str = "") -> bool:
         self.state = state
         if message:
             self.message = message
         if self.status_file is None:
-            return
+            return True
         payload = {
             "run_id": self.run_id,
             "pid": os.getpid(),
@@ -94,10 +120,18 @@ class TrainingControl:
             "updated_at": time.time(),
         }
         payload.update(self.metrics)
-        self.status_file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.status_file.with_name(self.status_file.name + f".{os.getpid()}.tmp")
-        temporary.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(temporary, self.status_file)
+        try:
+            terminal = state in {"completed", "stopped", "failed"}
+            write_json_atomic(self.status_file, payload, attempts=15 if terminal else 6)
+            return True
+        except OSError as error:
+            # Telemetry is optional: an unavailable GUI file must never abort
+            # learning, prevent a clean stop, or interrupt a model save.
+            now = time.monotonic()
+            if now - self.last_status_warning >= 30.0:
+                logging.getLogger(__name__).warning("GUI status update deferred; continuing without this update: %s", error)
+                self.last_status_warning = now
+            return False
 
     def _command(self) -> str:
         if self.control_file is None:
@@ -124,10 +158,14 @@ class TrainingControl:
             return False
         if command == "pause":
             pause_started = time.monotonic()
+            last_pause_status = pause_started
             self.write_status("paused", timesteps, "Training paused; workers are idle")
             while command == "pause":
                 time.sleep(0.2)
                 command = self._command()
+                if command == "pause" and time.monotonic() - last_pause_status >= 1.0:
+                    self.write_status("paused", timesteps)
+                    last_pause_status = time.monotonic()
             self.paused_seconds += time.monotonic() - pause_started
             self.cached_command = command
             if command == "stop":

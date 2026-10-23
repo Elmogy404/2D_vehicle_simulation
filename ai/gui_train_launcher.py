@@ -10,6 +10,8 @@ import subprocess
 import sys
 import traceback
 
+from training_control import write_json_atomic
+
 
 def process_is_running(pid: int) -> bool:
     """Check an external PID, including processes another Godot window started."""
@@ -61,9 +63,7 @@ def report_failure(arguments: list[str], message: str) -> None:
         if status.get("run_id") != option("--run-id") or status.get("state") == "failed":
             return
         status.update(state="failed", message=message)
-        temporary = path.with_suffix(".launcher.tmp")
-        temporary.write_text(json.dumps(status), encoding="utf-8")
-        temporary.replace(path)
+        write_json_atomic(path, status, attempts=15)
     except (OSError, ValueError):
         pass  # The complete error remains available in the run log.
 

@@ -193,7 +193,9 @@ func _read_status() -> Dictionary:
 	var file := FileAccess.open(status_resource_path, FileAccess.READ)
 	if file == null:
 		return {}
-	var parsed: Variant = JSON.parse_string(file.get_as_text())
+	var content := file.get_as_text()
+	file.close()
+	var parsed: Variant = JSON.parse_string(content)
 	return parsed if parsed is Dictionary else {}
 
 
@@ -202,4 +204,6 @@ func _write_json(path: String, value: Dictionary) -> bool:
 	if file == null:
 		return false
 	file.store_string(JSON.stringify(value))
-	return true
+	var error := file.get_error()
+	file.close()
+	return error == OK

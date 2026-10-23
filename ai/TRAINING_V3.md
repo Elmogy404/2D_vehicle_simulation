@@ -54,6 +54,15 @@ current instance launched. This prevents another game window from marking an
 active trainer as failed. Integration-test status/control files are isolated
 from the user's actual GUI run.
 
+Windows status updates retry brief file-sharing conflicts while retaining the
+previous complete JSON. If status publication still fails, it logs a warning
+and defers the update without aborting PPO or model saving. Paused training
+retries its status periodically. The GUI closes read handles before parsing
+JSON, and the startup launcher uses the same retrying writer for failures.
+This fixes the observed `WinError 5` crash when replacing the GUI status file.
+The training environment remains version 3; existing version 3 checkpoints
+can resume with their original run name, worker count, and saved settings.
+
 ## Validation
 
 - Two independent 160-episode sweeps: zero invalid spawn/reference/goal poses
@@ -62,10 +71,15 @@ from the user's actual GUI run.
   1,302 actions respectively. Fixed four-tick stepping and idle stability pass.
 - Six headless/visual comparisons: identical colliders, graph, selected route,
   observations, rewards and trajectories. Eight-episode map reuse/refresh passed.
-- All 19 Python tests passed, covering reset recovery, version/resume guards, real PPO checkpoint
+- All 23 Python tests passed, covering reset recovery, version/resume guards, real PPO checkpoint
   callbacks, failure recovery, timeout telemetry, binomial intervals, external
   process detection, and exact seed/stage accounting with unequal parallel
   episode lengths. Single- and four-worker evaluation results match.
+- Status-file regressions include an actual Windows handle denying delete
+  sharing, transient retry/atomicity, persistent write failures, and real PPO
+  learning/model saving with an entirely unavailable GUI status file. An
+  isolated 10-worker recovery resumed from 30,730 to 34,570 steps and saved
+  successfully while 443 Windows reader locks were applied to its status file.
 - Real four-worker PPO run completed 8,192 steps, two 64-episode evaluations,
   checkpoint/best saves, then resumed successfully to 9,216 steps.
 - GUI lifecycle test passed start, pause, controller reconnection, resume,
