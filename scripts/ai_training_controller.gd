@@ -124,8 +124,10 @@ func start_training(config: Dictionary) -> String:
 	var output_root := String(config.get("output_root", "")).strip_edges()
 	if output_root.is_empty():
 		output_root = ProjectSettings.globalize_path("res://ai")
-	if resume_path.is_empty() and FileAccess.file_exists(output_root.path_join("models").path_join(run_name + ".zip")):
-		return "A model already uses this run name. Choose a new name or resume its checkpoint."
+	if resume_path.is_empty():
+		for suffix in [".zip", "_best.zip", "_training_config.json"]:
+			if FileAccess.file_exists(output_root.path_join("models").path_join(run_name + suffix)):
+				return "This run name already exists. Choose a new name or resume its checkpoint."
 	run_id = "%d_%d" % [int(Time.get_unix_time_from_system()), Time.get_ticks_usec()]
 	var control_path := ProjectSettings.globalize_path(control_resource_path)
 	var status_path := ProjectSettings.globalize_path(status_resource_path)
@@ -154,6 +156,7 @@ func start_training(config: Dictionary) -> String:
 		"--godot", godot_path,
 		"--steps", str(int(config.get("steps", 1000000))),
 		"--n-envs", str(int(config.get("workers", 1))),
+		"--generator-type", str(config.get("generator_type", "original")),
 		"--seed", str(int(config.get("seed", 7))),
 		"--learning-rate", str(config.get("learning_rate", 0.0003)),
 		"--torch-threads", str(int(config.get("torch_threads", 1))),
@@ -163,7 +166,10 @@ func start_training(config: Dictionary) -> String:
 		"--entropy-coefficient", str(config.get("entropy_coefficient", 0.01)),
 		"--checkpoint-every", str(int(config.get("checkpoint_every", 10240))),
 		"--eval-every", str(int(config.get("eval_every", 50000))),
-		"--eval-episodes", str(int(config.get("eval_episodes", 64))),
+		"--eval-episodes", str(int(config.get("eval_episodes", 128))),
+		"--min-eval-stage-episodes", str(int(config.get("min_eval_stage_episodes", 16))),
+		"--final-eval-episodes", str(int(config.get("final_eval_episodes", 256))),
+		"--final-eval-seed", str(int(config.get("final_eval_seed", 1000000))),
 		"--success-threshold", str(config.get("success_threshold", 0.9)),
 		"--early-stop-patience", str(int(config.get("early_stop_patience", 3))),
 		"--run-name", run_name,

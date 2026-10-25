@@ -135,6 +135,9 @@ func _set_crossing_active(active: bool) -> void:
 	if is_crossing == active:
 		return
 	is_crossing = active
+	var index := get_tree().get_first_node_in_group("simulation_spatial_index")
+	if index != null:
+		index.call("invalidate")
 	if active:
 		add_to_group("crossing_pedestrians")
 	else:

@@ -504,7 +504,7 @@ class HeadlessTrainingTab(ttk.Frame):
                      f"Evaluation time: {_duration(perf.get('evaluation_seconds'))}")
 
         # Evaluation
-        evaluation = status.get("last_evaluation", {})
+        evaluation = status.get("final_evaluation") or status.get("last_evaluation", {})
         if not evaluation and status.get("phase") != "evaluating":
             self.context_label.configure(
                 text=f"Next evaluation: {status.get('next_eval_step', 'not scheduled')} steps")
@@ -524,6 +524,9 @@ class HeadlessTrainingTab(ttk.Frame):
                      f"Early-stop streak {int(evaluation.get('early_stop_streak', 0))} / "
                      f"{int(evaluation.get('early_stop_patience', 0))}")
 
+        if evaluation.get('suite') == 'independent_holdout' and status.get('phase') != 'evaluating':
+            self.context_label.configure(text=f"Independent final holdout: {_percent(evaluation.get('success_rate'))} success across "
+                f"{evaluation.get('episodes', 0)} episodes. All-stage gate: {'PASS' if evaluation.get('gate_met') else 'NOT MET'}")
         self.eval_tree.delete(*self.eval_tree.get_children())
         for stage in evaluation.get("stages", []):
             interval = stage.get("success_interval", [0.0, 1.0])
@@ -681,6 +684,10 @@ class RunSetupTab(ttk.Frame):
             'eval_every':'Evaluation interval (0 disables)','eval_episodes':'Evaluation episodes','eval_workers':'Evaluation workers',
             'eval_seed':'Evaluation seed','success_threshold':'Early-stop success threshold','early_stop_patience':'Early-stop patience (0 disables)',
             'torch_threads':'PPO CPU threads'}
+        titles['generator_type'] = 'Road generator (original / segmented)'
+        titles.update(min_eval_stage_episodes='Minimum samples per stage for early stop',
+                      final_eval_episodes='Independent final evaluation episodes (0 disables)',
+                      final_eval_seed='Independent final evaluation seed')
         fields += [(key,titles[key],value) for key,value in DEFAULTS.items() if key not in {'resume','output_root'}]
         for key,title,default in fields:
             row=ttk.Frame(content)

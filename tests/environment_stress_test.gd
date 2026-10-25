@@ -21,6 +21,7 @@ func _ready() -> void:
 	add_child(main)
 	await get_tree().process_frame
 	main.call("_on_environment_generate_requested", 97531, false, 0)
+	await main.environment_generated
 	for frame in range(4):
 		await get_tree().process_frame
 	# This is a traffic-only stress run. Move the parked player out of the
@@ -104,6 +105,8 @@ func _ready() -> void:
 				float(car.get("speed")), float(car.get("progress")), float(car.get("route").length),
 				str(car.call("leader_state")), float(car.call("traffic_light_speed_limit"))
 			])
+			printerr("Trip handoff: ", car.get_meta("trip_block_reason", "no candidate"))
+			printerr("Rejected pose: ", car.get_meta("trip_block_pose", {}))
 	var pedestrians_moved: bool = false
 
 	for pedestrian in pedestrian_start:

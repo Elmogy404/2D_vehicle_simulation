@@ -31,6 +31,8 @@ class GuiLauncherTests(unittest.TestCase):
             ai.mkdir()
             shutil.copyfile(LAUNCHER, ai / LAUNCHER.name)
             shutil.copyfile(LAUNCHER.with_name("training_control.py"), ai / "training_control.py")
+            for name in ("training_config.py", "training_defaults.json"):
+                shutil.copyfile(LAUNCHER.with_name(name), ai / name)
             (ai / "train.py").write_text(source, encoding="utf-8")
             status = project / "status.json"
             status.write_text(json.dumps({"run_id": "test", "state": state, "message": "specific trainer error"}), encoding="utf-8")

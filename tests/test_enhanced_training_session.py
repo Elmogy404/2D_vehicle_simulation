@@ -124,7 +124,7 @@ class StandaloneSessionTests(unittest.TestCase):
             restored=resume_settings(path)
             self.assertEqual(restored['workers'],8)
             self.assertEqual(restored['run_name'],'test_run')
-            self.assertEqual(restored['output_root'],str(root))
+            self.assertEqual(Path(restored['output_root']).resolve(), root.resolve())
             self.assertEqual(model_metadata(path)['steps'],8192)
             manifest['environment_version']=2
             (models/'test_run_training_config.json').write_text(json.dumps(manifest))

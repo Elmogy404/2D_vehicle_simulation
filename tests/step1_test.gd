@@ -12,6 +12,7 @@ func _ready() -> void:
 	add_child(main)
 	await get_tree().process_frame
 	main.call("_on_environment_generate_requested", 13579, false, 0)
+	await main.environment_generated
 	await get_tree().physics_frame
 	await get_tree().physics_frame
 

@@ -13,6 +13,7 @@ func _ready() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 	main_scene.call("_on_environment_generate_requested", 123456789, false, 0)
+	await main_scene.environment_generated
 	_check(not get_tree().paused, "successful generation immediately resumes simulation")
 	await get_tree().process_frame
 	await get_tree().physics_frame

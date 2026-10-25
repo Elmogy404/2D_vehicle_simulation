@@ -12,7 +12,7 @@ import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
 
 from godot_gym_env import ENVIRONMENT_VERSION
-from training_metrics import summarize, summarize_evaluation
+from training_metrics import summarize, summarize_evaluation, evaluation_gate
 
 
 class TrainingObserver(BaseCallback):
@@ -136,24 +136,29 @@ class ParallelEvaluation(BaseCallback):
         if self.num_timesteps < self.next_eval:
             return True
         self.next_eval += self.args.eval_every
+        return self.evaluate()
+
+    def evaluate(self, *, holdout=False):
+        episode_count = getattr(self.args, "final_eval_episodes", 256) if holdout else self.args.eval_episodes
+        seed = getattr(self.args, "final_eval_seed", 1_000_000) if holdout else self.args.eval_seed
         started = time.perf_counter()
         paused_before = self.control.paused_seconds
-        self.control.metrics.update(phase="evaluating", evaluation_progress={"completed": 0, "total": self.args.eval_episodes})
-        self.control.write_status("running", self.num_timesteps, "Evaluating checkpoint on all eight route stages")
+        self.control.metrics.update(phase="evaluating", evaluation_progress={"completed": 0, "total": episode_count})
+        self.control.write_status("running", self.num_timesteps, "Evaluating independent final holdout" if holdout else "Evaluating checkpoint on all eight route stages")
         if not self.envs:
-            self.executor = ThreadPoolExecutor(max_workers=min(self.args.eval_workers, self.args.eval_episodes))
+            self.executor = ThreadPoolExecutor(max_workers=min(self.args.eval_workers, episode_count))
             # Append one by one so partial startup is also closed on failure.
-            for _ in range(min(self.args.eval_workers, self.args.eval_episodes)):
+            for _ in range(min(self.args.eval_workers, episode_count)):
                 self.envs.append(self.factory())
         active = {}
         outcomes = []
         next_episode = 0
 
         def reset_slot(index, episode):
-            obs, info = self.envs[index].reset(seed=self.args.eval_seed + episode,
+            obs, info = self.envs[index].reset(seed=seed + episode,
                 options={"curriculum": False, "curriculum_stage": episode % 8})
             return {"observation": obs, "stage": episode % 8, "steps": 0, "return": 0.0,
-                    "seed": self.args.eval_seed + episode, "actual_map_seed": info.get("seed")}
+                    "seed": seed + episode, "actual_map_seed": info.get("seed")}
 
         try:
             pending = {index: self.executor.submit(reset_slot, index, index) for index in range(len(self.envs))}
@@ -177,26 +182,35 @@ class ParallelEvaluation(BaseCallback):
                         del active[i]
                 pending = {}
                 for i in indices:
-                    if i not in active and next_episode < self.args.eval_episodes:
+                    if i not in active and next_episode < episode_count:
                         pending[i] = self.executor.submit(reset_slot, i, next_episode)
                         next_episode += 1
                 active.update({i: future.result() for i, future in pending.items()})
                 now = time.perf_counter()
                 if now - last_status >= 0.5:
-                    self.control.metrics["evaluation_progress"] = {"completed": len(outcomes), "total": self.args.eval_episodes,
+                    self.control.metrics["evaluation_progress"] = {"completed": len(outcomes), "total": episode_count,
                         "elapsed_seconds": now - started, "workers": len(self.envs)}
                     self.control.write_status("running", self.num_timesteps, "Evaluating checkpoint")
                     last_status = now
             summary = summarize_evaluation(outcomes)
             summary["timesteps"] = self.num_timesteps
             summary["duration_seconds"] = time.perf_counter() - started
+            minimum = getattr(self.args, "min_eval_stage_episodes", 16)
+            gate = evaluation_gate(summary, self.args.success_threshold, minimum)
+            if holdout:
+                summary.update(suite="independent_holdout", gate_met=gate, minimum_stage_episodes=minimum,
+                               seed=seed, model_path=str(self.best_path) + ".zip" if self.best_path.with_suffix(".zip").exists() else str(self.model_dir / self.args.run_name) + ".zip")
+                self.control.metrics["final_evaluation"] = summary
+                (self.runs_dir / f"{self.args.run_name}_holdout.json").write_text(
+                    json.dumps({"summary": summary, "episodes": outcomes}, indent=2))
+                print(f"HOLDOUT episodes={len(outcomes)} success={summary['success_rate']:.1%} gate={gate}", flush=True)
+                return True
             score = (summary["longest_stage_success_rate"], summary["longest_stage_turn_coverage"], summary["success_rate"],
                      -summary["crash_rate"], -summary["off_road_rate"], summary["mean_return"])
             save_best = self.best_score is None or score > self.best_score
             if save_best:
                 self.best_score = score
-            gate = summary["success_rate"] >= self.args.success_threshold and summary["longest_stage_success_rate"] >= self.args.success_threshold and summary["longest_stage_turn_coverage"] >= self.args.success_threshold
-            self.streak = self.streak + 1 if gate and self.args.eval_episodes >= 8 else 0
+            self.streak = self.streak + 1 if gate else 0
             summary.update(best_checkpoint_saved=save_best, early_stop_streak=self.streak, early_stop_patience=self.args.early_stop_patience,
                            success_threshold=self.args.success_threshold, gate_met=gate)
             self.model.training_evaluation_state = {"best_score": self.best_score, "early_stop_streak": self.streak,
@@ -209,7 +223,7 @@ class ParallelEvaluation(BaseCallback):
                 temporary.replace(self.score_path)
                 self.control.metrics["best_model_path"] = str(self.best_path) + ".zip"
             self.control.last_evaluation = summary
-            self.control.metrics["evaluation_progress"] = {"completed": len(outcomes), "total": self.args.eval_episodes}
+            self.control.metrics["evaluation_progress"] = {"completed": len(outcomes), "total": episode_count}
             path = self.runs_dir / f"{self.args.run_name}_success_eval.csv"
             fields = [k for k in summary if k not in ("stages", "success_interval")]
             new_file = not path.exists()

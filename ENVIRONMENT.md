@@ -117,6 +117,6 @@ the asset catalog but are not placed in generated maps yet.
 The current simulation includes deterministic mixed-road geometry, signals,
 pedestrians, priority merges, reverse driving, exploration UI, and a connected
 navigation graph with alternate road loops. PPO training and live checkpoint
-viewing exist, but training still uses the original empty-road world; NPC and
-signal-aware training are future work. Weather and surface conditions are not
+viewing exist. Training can select the original or segmented empty-road world;
+NPC and signal-aware training are future work. Weather and surface conditions are not
 implemented.

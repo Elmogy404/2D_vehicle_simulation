@@ -50,6 +50,7 @@ var _map_paths: Array[PackedVector2Array] = []
 var _map_half_width_profiles: Array[PackedFloat32Array] = []
 var _map_lane_profiles: Array[PackedFloat32Array] = []
 var _map_road_classes := PackedStringArray()
+var _map_one_way_paths := PackedByteArray()
 
 var _rng := RandomNumberGenerator.new()
 var _generated_root: Node2D
@@ -375,6 +376,7 @@ func _build_simulation_data(grid: Dictionary) -> void:
 	_map_half_width_profiles.clear()
 	_map_lane_profiles.clear()
 	_map_road_classes.clear()
+	_map_one_way_paths.clear()
 	center_points.clear()
 	intersection_indices.clear()
 	intersection_types.clear()
@@ -401,15 +403,18 @@ func _build_simulation_data(grid: Dictionary) -> void:
 			_map_paths.append(sampled_points)
 			_map_half_width_profiles.append(sampled["half_widths"])
 			_map_lane_profiles.append(sampled["lane_profile"])
-			_map_road_classes.append(
-				"arterial" if maxi(from_lanes, to_lanes) >= 4 else "local"
-			)
+			var road_class := String(drive_path.get("route_type", ""))
+			if road_class != "roundabout":
+				road_class = "arterial" if maxi(from_lanes, to_lanes) >= 4 else "local"
+			_map_road_classes.append(road_class)
+			_map_one_way_paths.append(1 if bool(drive_path.get("one_way", false)) else 0)
 
 	road_network.build(
 		_map_paths,
 		_map_half_width_profiles,
 		_map_lane_profiles,
-		_map_road_classes
+		_map_road_classes,
+		_map_one_way_paths
 	)
 	var size := int(grid["size"])
 	var middle := int(grid["middle"])
@@ -463,14 +468,27 @@ func _sample_simulation_path(
 	if path.size() < 2:
 		return {"points": points, "half_widths": half_widths, "lane_profile": lane_profile}
 	var path_length := _polyline_length(path)
-	var sample_count := maxi(1, ceili(path_length / SIMULATION_SAMPLE_SPACING))
-	for sample_index in range(sample_count + 1):
-		var progress := float(sample_index) / float(sample_count)
-		var sample := _sample_polyline(path, path_length * progress)
-		var total_lanes := lerpf(float(start_lanes), float(end_lanes), progress)
-		points.append(sample["position"])
-		half_widths.append(total_lanes * LANE_WIDTH * 0.5)
-		lane_profile.append(total_lanes * 0.5)
+	var travelled := 0.0
+	# Preserve every authored corner. Global resampling can reduce a short bend
+	# to its endpoint chord, sending navigation through the inside curb.
+	for segment_index in range(path.size() - 1):
+		var start := path[segment_index]
+		var finish := path[segment_index + 1]
+		var length := start.distance_to(finish)
+		if length < 0.001:
+			continue
+		var divisions := maxi(1, ceili(length / SIMULATION_SAMPLE_SPACING))
+		for sample_index in range(divisions):
+			var weight := float(sample_index) / float(divisions)
+			var progress := (travelled + length * weight) / maxf(path_length, 0.001)
+			var total_lanes := lerpf(float(start_lanes), float(end_lanes), progress)
+			points.append(start.lerp(finish, weight))
+			half_widths.append(total_lanes * LANE_WIDTH * 0.5)
+			lane_profile.append(total_lanes * 0.5)
+		travelled += length
+	points.append(path[-1])
+	half_widths.append(float(end_lanes) * LANE_WIDTH * 0.5)
+	lane_profile.append(float(end_lanes) * 0.5)
 	return {"points": points, "half_widths": half_widths, "lane_profile": lane_profile}
 
 
@@ -1486,3 +1504,4 @@ func _clear_generation() -> void:
 	_map_half_width_profiles.clear()
 	_map_lane_profiles.clear()
 	_map_road_classes.clear()
+	_map_one_way_paths.clear()

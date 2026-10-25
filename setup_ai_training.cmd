@@ -9,7 +9,7 @@ if not errorlevel 1 (
 )
 if errorlevel 1 (
     echo.
-    echo Setup failed. Read the error above. Python 3.10 or newer must be installed.
+    echo Setup failed. Read the error above. Python 3.12 or newer must be installed.
     pause
     exit /b 1
 )

@@ -403,6 +403,13 @@ func _build_training_tab(tabs: TabContainer) -> void:
 	workers.value_changed.connect(_on_training_worker_count_changed)
 	_on_training_worker_count_changed(workers.value)
 	training_inputs["steps"] = _training_number_field(fields, "Total training timesteps", 1024, 50000000, 1, 1000000)
+	var generator_choice := OptionButton.new()
+	generator_choice.add_item("Original procedural network")
+	generator_choice.add_item("Segmented city")
+	fields.add_child(Label.new())
+	fields.get_child(fields.get_child_count() - 1).text = "Training road generator"
+	fields.add_child(generator_choice)
+	training_inputs["generator_type"] = generator_choice
 	training_inputs["seed"] = _training_number_field(fields, "Training seed", 1, 2147483646, 1, 7)
 	training_inputs["torch_threads"] = _training_number_field(fields, "PPO CPU threads", 1, 32, 1, 1)
 	training_inputs["eval_workers"] = _training_number_field(fields, "Parallel evaluation worlds", 1, 16, 1, 4)
@@ -413,7 +420,10 @@ func _build_training_tab(tabs: TabContainer) -> void:
 	training_inputs["entropy_coefficient"] = _training_number_field(fields, "Entropy coefficient", 0.0, 0.2, 0.001, 0.01)
 	training_inputs["checkpoint_every"] = _training_number_field(fields, "Checkpoint interval (steps)", 1, 5000000, 1, 10240)
 	training_inputs["eval_every"] = _training_number_field(fields, "Evaluation interval (0 disables)", 0, 5000000, 1000, 50000)
-	training_inputs["eval_episodes"] = _training_number_field(fields, "Episodes per evaluation", 8, 256, 8, 64)
+	training_inputs["eval_episodes"] = _training_number_field(fields, "Episodes per evaluation", 8, 1024, 8, 128)
+	training_inputs["min_eval_stage_episodes"] = _training_number_field(fields, "Minimum samples per stage for early stop", 1, 128, 1, 16)
+	training_inputs["final_eval_episodes"] = _training_number_field(fields, "Independent final evaluation (0 disables)", 0, 2048, 8, 256)
+	training_inputs["final_eval_seed"] = _training_number_field(fields, "Independent final evaluation seed", 1, 2147480000, 1, 1000000)
 	training_inputs["success_threshold"] = _training_number_field(fields, "Early-stop success threshold", 0.0, 1.0, 0.01, 0.9)
 	training_inputs["early_stop_patience"] = _training_number_field(fields, "Successful evaluations to stop (0 disables)", 0, 20, 1, 3)
 	_training_section(fields, "REWARD AND PENALTY WEIGHTS")
@@ -426,6 +436,19 @@ func _build_training_tab(tabs: TabContainer) -> void:
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	note.add_theme_font_size_override("font_size", 11)
 	fields.add_child(note)
+	var defaults: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("res://ai/training_defaults.json"))
+	for key in defaults["training"]:
+		if not training_inputs.has(key):
+			continue
+		var field: Control = training_inputs[key]
+		if field is SpinBox:
+			field.value = defaults["training"][key]
+		elif field is OptionButton:
+			field.selected = 1 if defaults["training"][key] == "segmented" else 0
+		elif key not in ["run_name", "output_root"]:
+			field.text = str(defaults["training"][key])
+	for key in reward_inputs:
+		reward_inputs[key].value = defaults["reward_config"][key]
 
 
 func _on_training_worker_count_changed(value: float) -> void:
@@ -486,7 +509,10 @@ func _training_config() -> Dictionary:
 	var config := {}
 	for key in training_inputs:
 		var field: Control = training_inputs[key]
-		config[key] = field.value if field is SpinBox else field.text.strip_edges()
+		if key == "generator_type":
+			config[key] = "segmented" if field.selected == 1 else "original"
+		else:
+			config[key] = field.value if field is SpinBox else field.text.strip_edges()
 	var rewards := {}
 	for key in reward_inputs:
 		rewards[key] = reward_inputs[key].value
@@ -538,7 +564,10 @@ func _on_training_status_changed(status: Dictionary) -> void:
 	training_resume_button.disabled = not active or state != "paused"
 	training_stop_button.disabled = not active or state in ["stopping", "saving"]
 	for field in training_inputs.values():
-		field.editable = not active
+		if field is OptionButton:
+			field.disabled = active
+		else:
+			field.editable = not active
 	for field in reward_inputs.values():
 		field.editable = not active
 

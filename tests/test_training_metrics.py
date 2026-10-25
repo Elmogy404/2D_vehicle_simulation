@@ -12,7 +12,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ai"))
 from training_callbacks import ParallelEvaluation, TrainingObserver
 from training_control import TrainingControl
-from training_metrics import summarize, success_interval
+from training_metrics import summarize, success_interval, summarize_evaluation, evaluation_gate
 
 
 class EvaluationWorld:
@@ -42,6 +42,49 @@ class EvaluationWorld:
 
 
 class MetricsTests(unittest.TestCase):
+    def test_early_stop_needs_enough_examples_and_success_at_every_stage(self):
+        cases = [dict(stage=i % 8, success=True, turn_requirement_met=True) for i in range(128)]
+        self.assertTrue(evaluation_gate(summarize_evaluation(cases), .9))
+        self.assertFalse(evaluation_gate(summarize_evaluation(cases[:64]), .9))
+        for case in cases:
+            if case["stage"] == 4:
+                case["success"] = False
+        self.assertFalse(evaluation_gate(summarize_evaluation(cases), .8))
+
+    def test_final_holdout_is_disjoint_and_cannot_change_checkpoint_selection(self):
+        import copy
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = SimpleNamespace(run_name="holdout", resume=None, n_envs=1, steps=64,
+                eval_every=64, eval_episodes=16, eval_workers=4, eval_seed=10000,
+                final_eval_episodes=32, final_eval_seed=1000000, min_eval_stage_episodes=2,
+                success_threshold=.9, early_stop_patience=0)
+            control = TrainingControl(None, None, "test", args.run_name, 64, 1)
+            observer = TrainingObserver(args, control, lambda model: None)
+            model = SimpleNamespace(num_timesteps=0, predict=lambda obs, deterministic: (obs.copy(), None),
+                logger=SimpleNamespace(name_to_value={}), save=lambda path: Path(str(path)+".zip").write_bytes(b"selected"))
+            worlds = []
+            def factory():
+                world = EvaluationWorld()
+                worlds.append(world)
+                return world
+            callback = ParallelEvaluation(args, control, observer, factory, root, root, lambda model: None, model)
+            callback.model, callback.num_timesteps = model, 64
+            try:
+                callback._on_step()
+                selected = copy.deepcopy(model.training_evaluation_state)
+                callback.evaluate(holdout=True)
+                self.assertEqual(model.training_evaluation_state, selected)
+                self.assertEqual((root / "holdout_best.zip").read_bytes(), b"selected")
+                report = json.loads((root / "holdout_holdout.json").read_text())
+                self.assertEqual([x["episodes"] for x in report["summary"]["stages"]], [4]*8)
+                seeds = {x["seed"] for x in report["episodes"]}
+                self.assertEqual(seeds, set(range(1000000,1000032)))
+                self.assertFalse(seeds.intersection(range(10000,10016)))
+            finally:
+                callback.close()
+
     def test_empty_window_and_binomial_uncertainty(self):
         self.assertEqual(summarize([]), {"episodes": 0})
         self.assertEqual(success_interval(0, 0), [0.0, 1.0])

@@ -101,6 +101,7 @@ var merge_signal_active: bool = false
 var signal_lights: Array[Line2D] = []
 var trip_end_node: int = -1
 var trip_previous_node: int = -1
+var trip_retry_remaining := 0.0
 
 
 # ============================================================
@@ -189,7 +190,17 @@ func configure_visual(texture: Texture2D, body_size: Vector2) -> void:
 
 
 # Place the car exactly on its lane and face it forward.
+func _nearby(group: String, radius: float) -> Array:
+	var index := get_tree().get_first_node_in_group("simulation_spatial_index")
+	if index == null:
+		return get_tree().get_nodes_in_group(group)
+	return index.call("nearby", group, global_position, radius)
+
+
 func snap_to_route() -> void:
+	var index := get_tree().get_first_node_in_group("simulation_spatial_index") if is_inside_tree() else null
+	if index != null:
+		index.call("invalidate")
 	if route == null or not route.is_valid():
 		velocity = Vector2.ZERO
 		return
@@ -208,6 +219,7 @@ func snap_to_route() -> void:
 # ============================================================
 
 func _physics_process(delta: float) -> void:
+	trip_retry_remaining = maxf(0.0, trip_retry_remaining - delta)
 	if route == null or not route.is_valid():
 		velocity = Vector2.ZERO
 		return
@@ -288,12 +300,17 @@ func _lane_offset_at(distance: float) -> float:
 	var width: float = route.lane_width
 
 	if not lane_change_active:
+		if route.has_method("get_npc_lane_offset"):
+			return float(route.call("get_npc_lane_offset", distance, lane_index, travel_direction))
 		return side * (float(lane_index) + 0.5) * width
 
 	var t := clampf(lane_change_elapsed / maxf(merge_duration, 0.1), 0.0, 1.0)
 	var smooth_t := t * t * (3.0 - 2.0 * t)
 	var from_offset := side * (float(lane_change_from) + 0.5) * width
 	var to_offset := side * (float(lane_change_to) + 0.5) * width
+	if route.has_method("get_npc_lane_offset"):
+		from_offset = float(route.call("get_npc_lane_offset", distance, lane_change_from, travel_direction))
+		to_offset = float(route.call("get_npc_lane_offset", distance, lane_change_to, travel_direction))
 	return lerpf(from_offset, to_offset, smooth_t)
 
 
@@ -507,11 +524,15 @@ func handle_route_end() -> void:
 
 	if travel_direction > 0.0 and progress >= exit:
 		progress = exit
+		if trip_retry_remaining > 0.0:
+			speed = 0.0
+			return
 		var manager := get_parent()
 		if manager != null and manager.has_method("assign_next_trip") \
 		and manager.call("assign_next_trip", self, trip_end_node, trip_previous_node):
 			return
 		speed = 0.0
+		trip_retry_remaining = 0.5
 
 	elif travel_direction < 0.0 and progress <= exit:
 		progress = exit
@@ -614,7 +635,12 @@ func traffic_light_speed_limit() -> float:
 	var route_search_distance := detection_distance + 500.0
 	var route_offset := global_position.distance_to(route.get_position_at(progress))
 
-	for candidate in get_tree().get_nodes_in_group("traffic_lights"):
+	var index := get_tree().get_first_node_in_group("simulation_spatial_index")
+	var light_reach := INF
+	if index != null:
+		index.call("ensure_current")
+		light_reach = route_search_distance + route.max_segment_length + route_offset + float(index.get("maximum_light_radius"))
+	for candidate in _nearby("traffic_lights", light_reach) if is_finite(light_reach) else get_tree().get_nodes_in_group("traffic_lights"):
 		var light := candidate as Node
 		if light == null or not light.has_method("requires_stop_for_heading"):
 			continue
@@ -627,27 +653,15 @@ func traffic_light_speed_limit() -> float:
 			+ route_offset + light_radius
 		if global_position.distance_squared_to(light.global_position) > search_reach * search_reach:
 			continue
-		var near: Dictionary = route.nearest(
-			light.global_position, progress, route_search_distance
-		)
-		if float(near["distance"]) > light_radius:
+		var target: Dictionary = light.call("get_stop_target", route, progress, travel_direction, vehicle_length, route_search_distance)
+		if target.is_empty():
 			continue
-		var light_progress := float(near["progress"])
-		var stop_offset := intersection_width * 0.5 + 18.0
-		var stop_progress := clampf(
-			light_progress - travel_direction * stop_offset,
-			0.0,
-			route.length
-		)
-		var center_gap: float = (
-			(stop_progress - progress) * travel_direction
-		)
-		var bumper_gap: float = center_gap - vehicle_length * 0.5
+		var bumper_gap := float(target["gap"])
 
 		if bumper_gap >= 0.0 and bumper_gap < nearest_gap:
 			nearest_gap = bumper_gap
 			nearest_light = light
-			nearest_approach_heading = route.get_direction_at(light_progress) * travel_direction
+			nearest_approach_heading = target["heading"]
 
 	if nearest_light == null:
 		return cruise_speed
@@ -683,7 +697,7 @@ func leader_state() -> Dictionary:
 	var best_gap: float = INF
 	var best_speed: float = 0.0
 
-	for other in get_tree().get_nodes_in_group("traffic"):
+	for other in _nearby("traffic", detection_distance + vehicle_width + 200.0):
 		if not is_instance_valid(other) or other == self:
 			continue
 		if _has_crossing_right_of_way_over(other):
@@ -718,7 +732,7 @@ func leader_state() -> Dictionary:
 			best_gap = ego_gap
 			best_speed = float(ego.get("current_speed"))
 
-	for pedestrian in get_tree().get_nodes_in_group("crossing_pedestrians"):
+	for pedestrian in _nearby("crossing_pedestrians", detection_distance + vehicle_width + 200.0):
 		if not is_instance_valid(pedestrian):
 			continue
 		var pedestrian_gap := _world_gap_to_body(

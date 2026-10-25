@@ -14,6 +14,7 @@ func _run() -> void:
 	root.add_child(main_scene)
 	var settings: Node = main_scene.get_node("SettingsPopup")
 	settings.emit_signal("generate_requested", 333333333, false, 0)
+	await main_scene.environment_generated
 	await process_frame
 	await process_frame
 
@@ -54,7 +55,7 @@ func _run() -> void:
 	if marker == null or not bool(marker.get("active")) \
 	or not bool(minimap.get("show_goal")) \
 	or not bool(minimap.get("show_planned_route")):
-		_fail("AI destination or graph-planned route was not shown")
+		_fail("AI destination or graph-planned route was not shown: " + String(main_scene.get("ai_status")))
 		return
 	var goal_distance := float(main_scene.get("ai_goal_progress")) \
 		- float(main_scene.get("ai_last_progress"))

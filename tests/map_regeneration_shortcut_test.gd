@@ -23,8 +23,10 @@ func _run_test() -> void:
 		_fail("F must not bypass the initial map settings.")
 		return
 	settings.emit_signal("generate_requested", 123456789, false, 0)
+	await main.environment_generated
 	var first_seed := int(roads.get("seed_value"))
 	root.push_input(f_key)
+	await main.environment_generated
 	await process_frame
 	if not _map_is_ready(main, roads, traffic, 0, first_seed):
 		_fail("F did not rebuild the original map with a fresh seed.")
@@ -49,10 +51,13 @@ func _run_test() -> void:
 	gear.pressed.emit()
 
 	settings.emit_signal("generate_requested", 20261015, false, 1)
+
+	await main.environment_generated
 	var segmented_seed := int(roads.get("seed_value"))
 	game_over.visible = true
 	paused = true
 	root.push_input(f_key)
+	await main.environment_generated
 	await process_frame
 	if not _map_is_ready(main, roads, traffic, 1, segmented_seed) \
 	or game_over.visible or paused:
@@ -62,6 +67,7 @@ func _run_test() -> void:
 	main.set("ai_mode_active", true)
 	var old_ai_seed := int(roads.get("seed_value"))
 	root.push_input(f_key)
+	await main.environment_generated
 	await process_frame
 	var manual_spawn: Dictionary = traffic.call("get_ego_spawn_pose")
 	var saved_position: Vector2 = main.get("saved_manual_position")

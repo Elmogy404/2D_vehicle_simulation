@@ -1,16 +1,15 @@
 extends Node2D
 
+const DRIVING_TASK = preload("res://scripts/driving_task.gd")
+const SPATIAL_INDEX = preload("res://scripts/simulation_spatial_index.gd")
+var live_driving_task := DRIVING_TASK.new()
+
 const POLICY_SERVER_PORT := 8766
 const POLICY_SERVER_START_TIMEOUT_MSEC := 20000
 const POLICY_ACTION_REPEAT := 4
-const MAX_GOAL_DISTANCE := 6000.0
 const MIN_GOAL_DISTANCE := 250.0
 const DEFAULT_GOAL_DISTANCE := 4200.0
-const GOAL_ROUTE_START_CLEARANCE := 80.0
-const GOAL_ROUTE_EXTRA_MINIMUM := 160.0
-const GOAL_ROUTE_EXTRA_MAXIMUM := 240.0
 const GOAL_RADIUS := 85.0
-const ROAD_PREVIEW_DISTANCES := [60.0, 120.0, 240.0, 400.0]
 const OBSERVATION_SIZE := 31
 const DEFAULT_AI_CHECKPOINT := 1
 const ORIGINAL_GENERATOR_TRAFFIC_COUNT := 8
@@ -66,9 +65,14 @@ var saved_manual_steering := 0.0
 var saved_manual_crashed := false
 var saved_debug_camera_mode := false
 var environment_ready := false
+var environment_building := false
+signal environment_generated
 
 
 func _ready() -> void:
+	var spatial_index := SPATIAL_INDEX.new()
+	spatial_index.name = "SpatialIndex"
+	add_child(spatial_index)
 	goal_marker = Node2D.new()
 	goal_marker.name = "AiGoalMarker"
 	goal_marker.set_script(load("res://scripts/goal_marker.gd"))
@@ -130,7 +134,8 @@ func _physics_process(_delta: float) -> void:
 		_stop_vehicle_for_ai_result()
 		return
 
-	if ego_vehicle.global_position.distance_to(ai_goal_position) <= GOAL_RADIUS:
+	if float(route_state["progress"]) >= ai_goal_progress - GOAL_RADIUS \
+	and ego_vehicle.global_position.distance_to(ai_goal_position) <= GOAL_RADIUS:
 		ai_goal_reached = true
 		ai_status = "Destination reached! Press R for another goal or I to return."
 		_stop_vehicle_for_ai_result()
@@ -321,6 +326,8 @@ func _on_environment_generate_requested(
 	randomize_seed: bool,
 	generator_type: int
 ) -> void:
+	if environment_building:
+		return
 	var chosen_seed := requested_seed
 	if randomize_seed:
 		var seed_rng := RandomNumberGenerator.new()
@@ -331,6 +338,9 @@ func _on_environment_generate_requested(
 	if chosen_seed <= 0:
 		settings_popup.call("set_status", "Use a positive seed so this map can be reproduced.")
 		return
+	environment_building = true
+	environment_ready = false
+	get_tree().paused = true
 
 	road_generator.call("set_generator_type", generator_type)
 	var is_segmented_generation := bool(road_generator.call("uses_segmented_generation"))
@@ -352,15 +362,27 @@ func _on_environment_generate_requested(
 	traffic_light_manager.set("seed_value", posmod(chosen_seed + 104729, 2147483647))
 	pedestrian_manager.set("seed_value", posmod(chosen_seed + 130363, 2147483647))
 	road_generator.call("generate_with_seed", chosen_seed)
+	# Physics queries must see the new walls, with the previous map removed,
+	# before validating spawns or deploying any dynamic actors.
+	await get_tree().physics_frame
+	await get_tree().physics_frame
 	var route: RoutePath = road_generator.get_route()
 	var route_length := route.length if route != null else 0.0
 	if route == null or not route.is_valid():
+		environment_building = false
 		environment_ready = false
 		settings_popup.call("set_map_generated", false)
 		settings_popup.call("set_popup_open", true)
 		get_tree().paused = true
 		settings_popup.call("set_status", "This seed did not produce a valid road (%.0f units). Try another seed." % route_length)
+		environment_generated.emit()
 		return
+	environment_ready = true
+	environment_building = false
+	if ai_mode_active:
+		_begin_ai_goal()
+	else:
+		place_ego()
 	if ai_mode_active:
 		# The old manual pose belongs to the previous map. Leaving AI mode must
 		# restore the player at a valid spawn on this newly generated one.
@@ -376,6 +398,7 @@ func _on_environment_generate_requested(
 	if ai_mode_active:
 		ai_status = "Map regenerated. AI goal replanned."
 		_update_mode_hud()
+	environment_generated.emit()
 
 
 func _on_settings_visibility_changed(is_open: bool) -> void:
@@ -395,43 +418,30 @@ func _begin_ai_goal() -> void:
 		return
 
 	ai_rng.randomize()
+	var task := live_driving_task
+	task.validation_cache.clear()
+	task.ego = ego_vehicle
+	task.road_generator = road_generator
+	task.episode_rng = ai_rng
 	var requested_turns := _minimum_turns_for_target_distance(ai_target_distance)
-	var route_data: Dictionary = network.call(
-		"choose_random_route",
-		ai_target_distance + GOAL_ROUTE_EXTRA_MINIMUM,
-		ai_target_distance + GOAL_ROUTE_EXTRA_MAXIMUM,
-		requested_turns,
-		ai_rng
-	)
-	if route_data.is_empty():
-		ai_status = "No connected route fits %d units. Lower the target and press R." % roundi(ai_target_distance)
+	var selection := {}
+	# A playable seed need not support the training district's full turn
+	# curriculum. Preserve clearance and distance, and disclose fewer turns.
+	for turns in range(requested_turns, -1, -1):
+		task.minimum_turns = turns
+		selection = task._select_trip(Vector2(ai_target_distance, ai_target_distance))
+		if not selection.is_empty():
+			break
+	if selection.is_empty():
+		ai_status = "No safe route fits this goal. Lower the target and press R."
 		ai_failed = true
 		return
-
-	ai_route = RoutePath.new()
-	ai_route.build(
-		route_data["points"],
-		route_data["half_widths"],
-		PackedFloat32Array(),
-		float(road_generator.get("lane_width"))
-	)
-	if not ai_route.is_valid():
-		ai_status = "The road planner returned an invalid route. Press R to retry."
-		ai_failed = true
-		return
-	ai_route_turns = int(route_data.get("turns", 0))
-	ai_turn_requirement_met = bool(route_data.get("turn_requirement_met", false))
-	var start_progress := minf(GOAL_ROUTE_START_CLEARANCE, ai_route.length * 0.1)
-	var available_goal_distance := ai_route.length - start_progress - GOAL_ROUTE_START_CLEARANCE * 0.5
-	if available_goal_distance < ai_target_distance:
-		ai_status = "The selected route is too short for %d units. Press R to retry." % roundi(ai_target_distance)
-		ai_failed = true
-		return
-	ai_goal_progress = start_progress + ai_target_distance
-	ai_goal_position = ai_route.get_position_at(
-		ai_goal_progress,
-		_ai_lane_center_offset_at(ai_goal_progress)
-	)
+	ai_route = task.route
+	var start_progress := float(selection["start"])
+	ai_goal_progress = float(selection["goal"])
+	ai_route_turns = task._count_trip_turns(ai_route, start_progress, ai_goal_progress)
+	ai_turn_requirement_met = ai_route_turns >= requested_turns
+	ai_goal_position = ai_route.get_position_at(ai_goal_progress, _ai_lane_center_offset_at(ai_goal_progress))
 	ai_last_progress = start_progress
 	ai_goal_reached = false
 	ai_failed = false
@@ -606,55 +616,23 @@ func _stop_vehicle_for_ai_result() -> void:
 
 
 func _get_ai_route_state() -> Dictionary:
-	var nearest: Dictionary = ai_route.nearest(
-		ego_vehicle.global_position,
-		ai_last_progress,
-		1800.0
-	)
-	var progress := float(nearest["progress"])
-	var center: Vector2 = ai_route.get_position_at(progress)
-	var direction: Vector2 = ai_route.get_direction_at(progress)
-	var normal: Vector2 = ai_route.get_normal_at(progress)
-	var lateral_offset := (ego_vehicle.global_position - center).dot(normal)
-	var target_lane_offset := _ai_lane_center_offset_at(progress)
-	return {
-		"progress": progress,
-		"lateral_offset": lateral_offset,
-		"lane_error": lateral_offset - target_lane_offset,
-		"heading_error": direction.angle_to(Vector2.UP.rotated(ego_vehicle.global_rotation)),
-		"half_width": ai_route.get_half_width_at(progress)
-	}
+	var task := live_driving_task
+	task.ego = ego_vehicle
+	task.route = ai_route
+	task.last_progress = ai_last_progress
+	return task._get_route_state()
 
 
 func _get_ai_observation() -> Array[float]:
-	var result: Array[float] = []
-	if ai_route == null or not ai_route.is_valid():
-		result.resize(OBSERVATION_SIZE)
-		result.fill(0.0)
-		return result
-	var state := _get_ai_route_state()
-	var sensors: Node = ego_vehicle.get_node("SensorRig")
-	sensors.call("update_sensors")
-	for distance in sensors.call("get_observation"):
-		result.append(clampf(float(distance), 0.0, 1.0))
-	result.append(clampf(float(ego_vehicle.get("current_speed")) / float(ego_vehicle.get("max_speed")), -1.0, 1.0))
-	result.append(clampf(float(ego_vehicle.get("steering_input")), -1.0, 1.0))
-	result.append(clampf(float(state["heading_error"]) / PI, -1.0, 1.0))
-	result.append(clampf(float(state["lane_error"]) / ai_route.lane_width, -1.0, 1.0))
-	result.append(clampf((ai_goal_progress - float(state["progress"])) / MAX_GOAL_DISTANCE, -1.0, 1.0))
-	for lookahead in ROAD_PREVIEW_DISTANCES:
-		var preview_progress := minf(float(state["progress"]) + lookahead, ai_route.length)
-		var lane_offset := _ai_lane_center_offset_at(preview_progress)
-		var preview_point: Vector2 = ai_route.get_position_at(preview_progress, lane_offset)
-		var local_point: Vector2 = ego_vehicle.to_local(preview_point)
-		result.append(clampf(local_point.x / ROAD_PREVIEW_DISTANCES[-1], -1.0, 1.0))
-		result.append(clampf(-local_point.y / ROAD_PREVIEW_DISTANCES[-1], -1.0, 1.0))
-	for lookahead in ROAD_PREVIEW_DISTANCES:
-		var preview_progress := minf(float(state["progress"]) + lookahead, ai_route.length)
-		var max_half_width := float(road_generator.get("maximum_road_width")) * 0.5
-		result.append(clampf(ai_route.get_half_width_at(preview_progress) / maxf(max_half_width, 1.0), 0.0, 1.0))
-	result.append_array([0.0, 0.0, 0.0, 0.0, 1.0])
-	return result
+	var task := live_driving_task
+	task.ego = ego_vehicle
+	task.road_generator = road_generator
+	task.route = ai_route
+	task.last_progress = ai_last_progress
+	task.goal_progress = ai_goal_progress
+	task.base_max_speed = float(ego_vehicle.get("max_speed"))
+	ego_vehicle.get_node("SensorRig").call("update_sensors")
+	return task._get_observation()
 
 
 func _goal_distance_remaining() -> float:
@@ -665,10 +643,8 @@ func _goal_distance_remaining() -> float:
 
 
 func _ai_lane_center_offset_at(progress: float) -> float:
-	return minf(
-		ai_route.lane_width * 0.5,
-		ai_route.get_half_width_at(progress) * 0.5
-	)
+	var task := live_driving_task
+	return task._lane_center_offset_for_route(ai_route, progress)
 
 
 func _policy_is_connected() -> bool:
@@ -725,6 +701,8 @@ func _update_mode_hud() -> void:
 
 
 func _on_road_regenerated() -> void:
+	if environment_building:
+		return
 	environment_ready = road_generator.get_route() != null \
 		and road_generator.get_route().is_valid()
 	if ai_mode_active:

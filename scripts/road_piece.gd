@@ -221,14 +221,17 @@ func get_crosswalks() -> Array[Dictionary]:
 	return result
 
 
-## Paths are deliberately local to a piece. Junction paths are arm centerlines;
-## the next phase can add turn-specific curves after the asset layout is signed off.
+## Paths are local to a piece. Circular hubs expose a directed circulation
+## ring and radial connections, never a shortcut through the center island.
 func get_drive_paths() -> Array[Dictionary]:
 	var paths: Array[Dictionary] = []
 	var ports := get_ports()
 	if ["bulb_3_road_junction", "bulb_4_road_junction"].has(String(piece_id)):
+		var ring_radius := (BULB_RADIUS + BULB_ISLAND_RADIUS) * 0.5
 		for port in ports:
-			paths.append({"from_port": port["id"], "to_port": "bulb", "route_type": "roundabout_approach", "points": PackedVector2Array([port["position"], Vector2.ZERO])})
+			paths.append({"from_port": port["id"], "to_port": "bulb", "route_type": "roundabout_approach", "points": PackedVector2Array([port["position"], Vector2(port["outward"]) * ring_radius])})
+		paths.append({"from_port": "bulb", "to_port": "bulb", "route_type": "roundabout",
+			"one_way": true, "points": _arc_path(Vector2.ZERO, ring_radius, 0.0, -TAU, 96)})
 		return paths
 	if ports.size() == 2:
 		var first: Dictionary = ports[0]
@@ -287,6 +290,7 @@ func get_road_edge_paths() -> Array[PackedVector2Array]:
 					outward * join_distance + across * road_half * side
 				]))
 		edges.append_array(_get_open_circle_curb_paths(BULB_RADIUS, road_half, arm_angles))
+		edges.append(_arc_path(Vector2.ZERO, BULB_ISLAND_RADIUS, 0.0, TAU, 96))
 	elif id == "u_turn_dead_end_bulb":
 		var road_half := LANE_WIDTH
 		var bulb_center := Vector2(0.0, 250.0)

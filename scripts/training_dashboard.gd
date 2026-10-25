@@ -214,11 +214,13 @@ func update_status(status: Dictionary) -> void:
 		runtime_label.text = "Latest resets: %.1f ms average | Cached maps: %d / %d workers | Evaluation time: %s" % [reset_ms / worker_count, reused, worker_count, _duration(performance.get("evaluation_seconds"))]
 	else:
 		runtime_label.text = "Reset timings appear when workers begin collecting experience."
-	var evaluation: Dictionary = status.get("last_evaluation", {})
+	var evaluation: Dictionary = status.get("final_evaluation", status.get("last_evaluation", {}))
 	context_label.text = "Next evaluation: %s steps" % str(status.get("next_eval_step", "not scheduled"))
 	if not evaluation.is_empty():
 		context_label.text = "At %d steps  •  %s success  •  %s crash  •  %d episodes  •  %.1fs\nLongest routes: %s  •  Early-stop streak %d / %d" % [int(evaluation.get("timesteps", 0)), _percent(evaluation.get("success_rate")), _percent(evaluation.get("crash_rate")), int(evaluation.get("episodes", 0)), float(evaluation.get("duration_seconds", 0)), _percent(evaluation.get("longest_stage_success_rate")), int(evaluation.get("early_stop_streak", 0)), int(evaluation.get("early_stop_patience", 0))]
 	var evaluation_progress: Dictionary = status.get("evaluation_progress", {})
+	if evaluation.get("suite") == "independent_holdout":
+		context_label.text = "Independent final holdout: %s success across %d episodes. All-stage gate: %s" % [_percent(evaluation.get("success_rate")), int(evaluation.get("episodes", 0)), "PASS" if evaluation.get("gate_met", false) else "NOT MET"]
 	if status.get("phase") == "evaluating":
 		context_label.text = "Evaluating %d / %d episodes across %d worlds" % [int(evaluation_progress.get("completed", 0)), int(evaluation_progress.get("total", 0)), int(evaluation_progress.get("workers", 0))]
 	evaluation_table.clear()

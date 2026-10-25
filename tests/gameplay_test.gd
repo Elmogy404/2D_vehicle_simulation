@@ -129,6 +129,7 @@ func run_all() -> void:
 	add_child(main)
 	await get_tree().process_frame
 	main.call("_on_environment_generate_requested", 24680, false, 0)
+	await main.environment_generated
 	main.get_node("TrafficManager").call("set_traffic_enabled", false)
 	await wait_frames(3)
 

@@ -30,7 +30,7 @@ func _run_test() -> void:
 	or float(config.get("reward_config", {}).get("crash_penalty", 0.0)) != 35.0 \
 	or float(config.get("reward_config", {}).get("max_speed_reward", -1.0)) != 0.0 \
 	or not is_equal_approx(float(config.get("gamma", 0)), 0.999) \
-	or int(config.get("eval_episodes", 0)) != 64:
+	or int(config.get("eval_episodes", 0)) != 128:
 		push_error("Training tab defaults do not match the existing PPO trainer.")
 		quit(1)
 		return

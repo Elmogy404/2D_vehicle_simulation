@@ -12,6 +12,7 @@ func _run_test() -> void:
 	var main := MAIN_SCENE.instantiate() as Node2D
 	root.add_child(main)
 	main.get_node("SettingsPopup").emit_signal("generate_requested", TEST_SEED, false, 1)
+	await main.environment_generated
 	var cars: Array = main.get_node("TrafficManager").get("traffic_cars")
 	var lights: Array = main.get_node("TrafficLightManager").get("lights")
 	var view: Control = main.get_node("Minimap/View")
@@ -90,18 +91,14 @@ func _reference_traffic_light_speed_limit(car: Node) -> float:
 		var light := candidate as Node
 		if light == null or not light.has_method("requires_stop_for_heading"):
 			continue
-		var near: Dictionary = route.nearest(light.global_position, progress, detection_distance + 500.0)
-		var width: float = light.get("intersection_width")
-		if float(near["distance"]) > maxf(width * 0.65, 105.0):
+		var target: Dictionary = light.call("get_stop_target", route, progress, travel_direction, vehicle_length, detection_distance + 500.0)
+		if target.is_empty():
 			continue
-		var light_progress: float = near["progress"]
-		var stop_offset := width * 0.5 + 18.0
-		var stop_progress := clampf(light_progress - travel_direction * stop_offset, 0.0, route.length)
-		var bumper_gap := (stop_progress - progress) * travel_direction - vehicle_length * 0.5
+		var bumper_gap := float(target["gap"])
 		if bumper_gap >= 0.0 and bumper_gap < nearest_gap:
 			nearest_gap = bumper_gap
 			nearest_light = light
-			nearest_heading = route.get_direction_at(light_progress) * travel_direction
+			nearest_heading = target["heading"]
 	if nearest_light == null or not nearest_light.requires_stop_for_heading(
 		nearest_heading, float(car.get("speed")), nearest_gap, float(car.get("braking"))
 	):

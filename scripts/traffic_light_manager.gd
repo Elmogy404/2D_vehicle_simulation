@@ -144,6 +144,9 @@ func _regenerate_authored_lights(network: Object) -> void:
 
 
 func clear_lights() -> void:
+	var index := get_tree().get_first_node_in_group("simulation_spatial_index")
+	if index != null:
+		index.call("invalidate")
 	for light in lights:
 		if is_instance_valid(light):
 			if light.get_parent() != null:

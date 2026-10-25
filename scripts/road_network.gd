@@ -17,7 +17,8 @@ func build(
 	paths: Array[PackedVector2Array],
 	half_width_profiles: Array[PackedFloat32Array] = [],
 	lane_profiles: Array[PackedFloat32Array] = [],
-	road_classes: PackedStringArray = PackedStringArray()
+	road_classes: PackedStringArray = PackedStringArray(),
+	one_way_paths: PackedByteArray = PackedByteArray()
 ) -> void:
 	positions.clear()
 	adjacency.clear()
@@ -73,7 +74,8 @@ func build(
 			if previous >= 0 and previous != index:
 				_add_link(
 					previous, index, previous_half_width, half_width,
-					previous_lane_count, lane_count, road_class
+					previous_lane_count, lane_count, road_class,
+					path_index < one_way_paths.size() and one_way_paths[path_index] != 0
 				)
 			previous = index
 			previous_half_width = half_width
@@ -112,11 +114,12 @@ func _add_link(
 	half_width_b: float,
 	lane_count_a: float,
 	lane_count_b: float,
-	road_class: String
+	road_class: String,
+	one_way: bool = false
 ) -> void:
 	if not adjacency[a].has(b):
 		adjacency[a].append(b)
-	if not adjacency[b].has(a):
+	if not one_way and not adjacency[b].has(a):
 		adjacency[b].append(a)
 	var key := _edge_key(a, b)
 	var endpoint_widths := Vector2(half_width_a, half_width_b)
@@ -741,10 +744,7 @@ func graph_is_connected() -> bool:
 
 
 func edge_count() -> int:
-	var directed_total := 0
-	for neighbors in adjacency:
-		directed_total += neighbors.size()
-	return int(directed_total / 2)
+	return edge_half_widths.size()
 
 
 func has_alternate_routes() -> bool:

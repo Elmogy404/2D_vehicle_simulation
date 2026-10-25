@@ -11,8 +11,8 @@ import venv
 
 
 def main() -> None:
-    if sys.version_info < (3, 10):
-        raise SystemExit("Install Python 3.10 or newer, then run setup_ai_training.cmd again.")
+    if sys.version_info < (3, 12):
+        raise SystemExit("Install Python 3.12 or newer, then run setup_ai_training.cmd again.")
     project = Path(__file__).resolve().parents[1]
     environment = project / ".venv-ai"
     python = environment / "Scripts" / "python.exe"

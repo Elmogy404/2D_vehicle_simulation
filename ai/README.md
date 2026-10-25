@@ -1,5 +1,47 @@
 # PPO driving setups
 
+## Current training and verification
+
+The CLI, Godot training tab, and Training Studio share defaults in
+`training_defaults.json`. Core dependency versions are pinned in
+`requirements.txt`; setup requires Python 3.12 or newer.
+
+Choose `original` or `segmented` roads in either interface, or pass
+`--generator-type segmented` to `train.py`. Evaluation and model presentation
+discover the generator from the checkpoint's adjacent training manifest.
+Keep that manifest with a checkpoint when copying it to another computer.
+Original-road version 3 runs retain their existing observation semantics.
+Segmented runs use the same shared route/observation implementation as gameplay,
+but longer multi-turn goals: their last stage covers 16,000–22,000 units because
+authored city blocks are 3,900–5,300 units apart. Training remains empty-road.
+
+Checkpoint evaluation defaults to 128 episodes, evenly covering eight stages.
+Early stopping requires the requested success and turn-coverage threshold in
+every stage, with at least 16 samples per stage. Smaller evaluation batches can
+still measure progress but cannot satisfy that default early-stop requirement.
+After normal completion, the best checkpoint is evaluated on 256 independent
+episodes starting at seed 1,000,000. This final suite cannot select or replace
+the best model. Both dashboards show its result, and per-episode details are
+saved as `runs/<run_name>_holdout.json`. Manual End and save skips this extra
+evaluation. Configure these settings in either interface or with
+`--min-eval-stage-episodes`, `--final-eval-episodes`, and `--final-eval-seed`.
+
+New runs reserve their names before launching workers and record the tested
+package versions and simulation source fingerprint. Resume preserves the
+generator and existing experiment settings; changed simulation fingerprints
+require a new experiment. Legacy manifests without fingerprints retain their
+existing compatibility checks. Never reuse a run name to start from scratch.
+
+Run the combined regression suite from the project folder:
+
+```powershell
+.\.venv-ai\Scripts\python.exe tests\run_checks.py --godot "C:\path\to\Godot.exe" --full --lifecycle
+```
+
+The optional lifecycle test starts an isolated short PPO run and checks
+pause/resume/save. Results and full output go to `ai/runs/project_checks.json`.
+See `../IMPROVEMENTS.md` for the seven-part implementation and verification.
+
 Environment version 3 accelerates headless simulation, removes a conflicting
 lane/edge reward, and introduces gradual first-turn practice. Start a **new
 training run** after updating; earlier checkpoints remain available for
@@ -65,7 +107,7 @@ and braking do not compete with a reward for reaching the speed limiter.
 
 ## Train and evaluate Setup 2
 
-Use Python 3.10+ and Godot 4. Create a virtual environment and install the
+Use Python 3.12+ and Godot 4. Create a virtual environment and install the
 dependencies, then set `GODOT_BIN` to your Godot executable:
 
 ```powershell
@@ -124,7 +166,7 @@ runs slower than headless training.
 
 ## Train from the Godot GUI
 
-On a new Windows computer, install Python 3.10+ and Godot 4, then double-click
+On a new Windows computer, install Python 3.12+ and Godot 4, then double-click
 `setup_ai_training.cmd` in the project folder. It creates a local `.venv-ai`
 and downloads the AI dependencies; internet access is required. An incompatible
 copied environment is moved to a dated `.venv-ai-backup-*` folder, never deleted.

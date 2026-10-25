@@ -4,32 +4,12 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-import io
 from pathlib import Path
-import zipfile
-from unittest.mock import patch
-
-import torch
-from stable_baselines3 import PPO
 
 from godot_gym_env import GodotRoadEnv
 
 
-def load_model(path: Path) -> PPO:
-    """Load the local SB3 archive on the Windows/PyTorch runtime."""
-    original_torch_load = torch.load
-
-    def load_buffered_zip_member(
-        file_object: object,
-        *args: object,
-        **kwargs: object,
-    ) -> object:
-        if isinstance(file_object, zipfile.ZipExtFile):
-            file_object = io.BytesIO(file_object.read())
-        return original_torch_load(file_object, *args, **kwargs)
-
-    with patch.object(torch, "load", side_effect=load_buffered_zip_member):
-        return PPO.load(path, device="cpu")
+from policy_checkpoint import load_policy as load_model, checkpoint_generator
 
 
 def main() -> None:
@@ -47,6 +27,7 @@ def main() -> None:
         help="Goal-distance tier to monitor (0=shortest, 7=longest)",
     )
     parser.add_argument("--godot", help="Godot 4 executable; defaults to GODOT_BIN/PATH")
+    parser.add_argument("--generator-type", choices=["original", "segmented"])
     parser.add_argument("--stop-file", help="GUI-owned watch session: stop when this file exists and close its Godot window")
     arguments = parser.parse_args()
     if arguments.curriculum_stage not in range(8):
@@ -58,7 +39,7 @@ def main() -> None:
     if model_path.suffix != ".zip":
         model_path = model_path.with_suffix(".zip")
     model = load_model(model_path)
-    env = GodotRoadEnv(arguments.godot, visible=True, close_visible_on_exit=bool(arguments.stop_file))
+    env = GodotRoadEnv(arguments.godot, visible=True, close_visible_on_exit=bool(arguments.stop_file), generator_type=checkpoint_generator(model_path, arguments.generator_type))
     stop_file = Path(arguments.stop_file) if arguments.stop_file else None
     episode = 0
     successes = 0

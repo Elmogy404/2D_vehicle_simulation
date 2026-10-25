@@ -17,6 +17,7 @@ func _run_test() -> void:
 	root.add_child(main)
 	var settings: Node = main.get_node("SettingsPopup")
 	settings.emit_signal("generate_requested", TEST_SEED, false, 1)
+	await main.environment_generated
 	var roads: Node = main.get_node("RoadGenerator")
 	var route: RoutePath = roads.call("get_route")
 	var debug_camera: Camera2D = main.get_node("DebugCamera")

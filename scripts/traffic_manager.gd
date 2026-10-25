@@ -1,4 +1,6 @@
 extends Node2D
+const CLEARANCE = preload("res://scripts/vehicle_clearance.gd")
+const TRAFFIC_ROUTE = preload("res://scripts/traffic_route.gd")
 
 
 # ============================================================
@@ -69,6 +71,8 @@ var route: RoutePath
 
 var traffic_cars: Array[Node] = []
 var traffic_enabled: bool = false
+var route_clearance_cache: Dictionary = {}
+var last_rejected_pose: Dictionary = {}
 
 const TRAFFIC_TEXTURES: Array[Texture2D] = [
 	preload("res://assets/random cars/car_blue_1.png"),
@@ -190,11 +194,11 @@ func spawn_traffic() -> void:
 	var lane_width := float(road_generator.get("lane_width"))
 	for i in range(number_of_cars):
 		var spawned := false
-		for attempt in range(24):
+		for attempt in range(64):
 			var trip: Dictionary = network.call(
 				# NPC routes use shortest graph trips; the curriculum walk fallback
 				# is reserved for AI planning and can intentionally revisit blocks.
-				"choose_random_route", 850.0, 3400.0, 0, rng,
+				"choose_random_route", 850.0 if attempt < 32 else 450.0, 3400.0 if attempt < 32 else 1700.0, 0, rng,
 				PackedStringArray(["u_turn_bay"]), 4
 			)
 			if trip.is_empty():
@@ -218,7 +222,10 @@ func spawn_traffic() -> void:
 			)
 			var spawn_position := car_route.get_position_at(start_progress, spawn_offset)
 			var spawn_rotation := car_route.get_rotation_at(start_progress)
-			if not _network_spawn_is_clear(spawn_position, spawn_rotation):
+			var body_size := TRAFFIC_BODY_SIZES[i % TRAFFIC_BODY_SIZES.size()]
+			if not _network_spawn_is_clear(spawn_position, spawn_rotation, body_size):
+				continue
+			if not _route_is_clear(car_route, lane_index, body_size, start_progress):
 				continue
 			var node_path: Array = trip.get("nodes", [])
 			if node_path.size() < 2:
@@ -236,13 +243,8 @@ func spawn_traffic() -> void:
 
 func _route_from_trip_data(network: Object, trip: Dictionary, lane_width: float) -> RoutePath:
 	var rounded: Dictionary = network.call("smooth_route_data", trip, 120.0)
-	var car_route := RoutePath.new()
-	car_route.build(
-		rounded.get("points", PackedVector2Array()),
-		rounded.get("half_widths", PackedFloat32Array()),
-		rounded.get("lane_profile", PackedFloat32Array()),
-		lane_width
-	)
+	var car_route := TRAFFIC_ROUTE.new()
+	car_route.build_traffic(rounded, trip["points"], lane_width)
 	return car_route if car_route.is_valid() else null
 
 
@@ -274,40 +276,79 @@ func _instantiate_network_car(
 	return car
 
 
-func _network_spawn_is_clear(position: Vector2, car_rotation: float) -> bool:
+func _network_spawn_is_clear(position: Vector2, car_rotation: float,
+		body_size: Vector2 = Vector2(62, 122), ignore: Node = null) -> bool:
+	var clearance := CLEARANCE.new(body_size, 4.0)
+	if not clearance.is_clear(get_world_2d().direct_space_state, position, car_rotation):
+		return false
 	var forward := Vector2.UP.rotated(car_rotation)
 	for other in get_tree().get_nodes_in_group("traffic"):
-		if not is_instance_valid(other):
+		if not is_instance_valid(other) or other == ignore:
 			continue
-		if position.distance_to(other.global_position) < vehicle_length + 45.0:
+		var other_size := Vector2(float(other.get("vehicle_width")), float(other.get("vehicle_length")))
+		if CLEARANCE.bodies_overlap(position, car_rotation, body_size, other.global_position, other.global_rotation, other_size):
 			return false
 	var ego := get_tree().get_first_node_in_group("vehicle_obstacle")
 	if ego != null and is_instance_valid(ego):
-		if position.distance_to(ego.global_position) < vehicle_length + 90.0:
+		var ego_size := Vector2(float(ego.get("vehicle_width")), float(ego.get("vehicle_length")))
+		if CLEARANCE.bodies_overlap(position, car_rotation, body_size, ego.global_position, ego.global_rotation, ego_size, Vector2(12, 60)):
 			return false
 	for candidate in get_tree().get_nodes_in_group("pedestrians"):
-		if is_instance_valid(candidate) and position.distance_to(candidate.global_position) < 100.0:
+		if is_instance_valid(candidate) and CLEARANCE.bodies_overlap(position, car_rotation, body_size,
+			candidate.global_position, candidate.global_rotation, Vector2(16, 25), Vector2(6, 6)):
 			return false
 	return forward.length_squared() > 0.5
+
+
+func _route_is_clear(candidate: RoutePath, lane: int, body_size: Vector2, first: float) -> bool:
+	var cache_key := "%d:%d:%d:%d:%s:%.3f" % [hash(candidate.points), hash(candidate.half_widths), hash(candidate.lane_profile), lane, str(body_size), first]
+	if route_clearance_cache.has(cache_key):
+		return route_clearance_cache[cache_key]
+	if route_clearance_cache.size() >= 2048:
+		route_clearance_cache.clear()
+	var clearance := CLEARANCE.new(body_size, 2.0)
+	var space := get_world_2d().direct_space_state
+	var last := candidate.length - body_size.y * 0.5
+	var progress := first
+	while progress <= last:
+		var offset := candidate.get_lane_offset_at(progress, lane, 1.0)
+		if not clearance.is_clear(space, candidate.get_position_at(progress, offset), candidate.get_rotation_at(progress)):
+			last_rejected_pose = {"progress": progress, "first": first, "length": candidate.length, "position": candidate.get_position_at(progress, offset), "offset": offset, "half_width": candidate.get_half_width_at(progress)}
+			route_clearance_cache[cache_key] = false
+			return false
+		if is_equal_approx(progress, last):
+			break
+		progress = minf(progress + 5.0, last)
+	route_clearance_cache[cache_key] = last >= first
+	return last >= first
 
 
 func assign_next_trip(car: Node, start_node: int, previous_node: int) -> bool:
 	if not traffic_enabled or not is_instance_valid(car):
 		return false
+	# A graph-connected long trip can contain an unsafe turn farther ahead.
+	# Try straight/short alternatives on validation failure, not only when the
+	# graph has no route. Otherwise every retry can demand the same bad turn.
+	for attempt in range(8):
+		var minimum := 650.0 if attempt < 3 else 120.0
+		var maximum := 3000.0 if attempt < 3 else 1200.0
+		var turns := 1 if attempt < 3 else 0
+		var previous := previous_node if attempt < 6 else -1
+		if _assign_next_trip_candidate(car, start_node, previous, minimum, maximum, turns):
+			return true
+	return false
+
+
+func _assign_next_trip_candidate(car: Node, start_node: int, previous_node: int,
+		minimum: float, maximum: float, turns: int) -> bool:
 	var network: Object = road_generator.call("get_road_network")
 	if network == null:
 		return false
 	var trip: Dictionary = network.call(
 		"choose_random_route_from_node",
-		start_node, previous_node, 650.0, 3000.0, rng, 1,
+		start_node, previous_node, minimum, maximum, rng, turns,
 		PackedStringArray(["u_turn_bay"])
 	)
-	if trip.is_empty():
-		trip = network.call(
-			"choose_random_route_from_node",
-			start_node, previous_node, 250.0, 4200.0, rng, 0,
-			PackedStringArray(["u_turn_bay"])
-		)
 	if trip.is_empty():
 		return false
 	var car_route := _route_from_trip_data(
@@ -319,6 +360,17 @@ func assign_next_trip(car: Node, start_node: int, previous_node: int) -> bool:
 	if node_path.size() < 2:
 		return false
 	var next_lane := rng.randi_range(0, car_route.get_lane_count_at(0.0) - 1)
+	var body_size := Vector2(float(car.get("vehicle_width")), float(car.get("vehicle_length")))
+	var entry := minf(body_size.y * 0.5, car_route.length * 0.02)
+	var entry_position := car_route.get_position_at(entry, car_route.get_lane_offset_at(entry, next_lane, 1.0))
+	if not _route_is_clear(car_route, next_lane, body_size, entry):
+		car.set_meta("trip_block_reason", "route intersects wall")
+		car.set_meta("trip_block_pose", last_rejected_pose.duplicate())
+		return false
+	if not _network_spawn_is_clear(entry_position, car_route.get_rotation_at(entry), body_size, car):
+		car.set_meta("trip_block_reason", "entry occupied")
+		return false
+	car.set_meta("trip_block_reason", "")
 	car.call(
 		"assign_trip", car_route, next_lane,
 		int(trip.get("end_node", -1)), int(node_path[-2])
@@ -479,6 +531,10 @@ func get_ego_spawn_pose() -> Dictionary:
 # ============================================================
 
 func clear_traffic() -> void:
+	route_clearance_cache.clear()
+	var index := get_tree().get_first_node_in_group("simulation_spatial_index")
+	if index != null:
+		index.call("invalidate")
 	for car in traffic_cars:
 		if is_instance_valid(car):
 			# Remove from the tree immediately so spawn

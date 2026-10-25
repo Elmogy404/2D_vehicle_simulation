@@ -112,6 +112,41 @@ func requires_stop(vehicle_speed: float, gap: float, braking: float) -> bool:
 	return _state_requires_stop(state, vehicle_speed, gap, braking)
 
 
+func get_stop_target(car_route: RoutePath, car_progress: float, travel_direction: float,
+		vehicle_length: float, search_distance: float) -> Dictionary:
+	var target := {}
+	var authored := false
+	for arm in approach_arms:
+		if not bool(arm.get("stop_line_is_authored", false)):
+			continue
+		authored = true
+		var stop_center := to_global(Vector2(arm["stop_center_local"]))
+		var near := car_route.nearest(stop_center, car_progress, search_distance)
+		var stop_progress := float(near["progress"])
+		var heading := car_route.get_direction_at(stop_progress) * travel_direction
+		var incoming := -Vector2(arm["outward"])
+		if heading.dot(incoming) < 0.65 or float(near["distance"]) > float(arm["half_width"]):
+			continue
+		var gap := (stop_progress - car_progress) * travel_direction - vehicle_length * 0.5
+		if gap < -6.0 or gap > search_distance:
+			continue
+		if target.is_empty() or gap < float(target["gap"]):
+			target = {"gap": maxf(gap, 0.0), "heading": incoming, "stop_progress": stop_progress}
+	if authored:
+		# Once a car has crossed its incoming stop line, don't apply the
+		# outgoing arm's light to it in the middle of a turn.
+		return target
+	var near := car_route.nearest(global_position, car_progress, search_distance)
+	if float(near["distance"]) > maxf(intersection_width * 0.65, 105.0):
+		return {}
+	var light_progress := float(near["progress"])
+	var stop_progress := clampf(light_progress - travel_direction * (intersection_width * 0.5 + 18.0), 0.0, car_route.length)
+	var gap := (stop_progress - car_progress) * travel_direction - vehicle_length * 0.5
+	if gap < 0.0:
+		return {}
+	return {"gap": gap, "heading": car_route.get_direction_at(light_progress) * travel_direction, "stop_progress": stop_progress}
+
+
 func requires_stop_for_heading(
 	heading: Vector2,
 	vehicle_speed: float,

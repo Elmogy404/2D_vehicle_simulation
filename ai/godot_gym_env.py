@@ -29,8 +29,12 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
         reward_config: dict[str, float] | None = None,
         parent_window_id: int | None = None,
         close_visible_on_exit: bool = False,
+        generator_type: str = "original",
     ) -> None:
         super().__init__()
+        if generator_type not in {"original", "segmented"}:
+            raise ValueError("generator_type must be original or segmented")
+        self.generator_type = generator_type
         self.action_space = spaces.Box(
             low=np.full(ACTION_SIZE, -1.0, dtype=np.float32),
             high=np.full(ACTION_SIZE, 1.0, dtype=np.float32),
@@ -61,6 +65,7 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
             else int(self.np_random.integers(1, 2**31 - 1))
         )
         reset_options = dict(options or {})
+        reset_options["generator_type"] = self.generator_type
         reset_options["reward_config"] = self.reward_config
         reset_options["reuse_map"] = seed is None and not restoring
         if self._pending_training_state is not None:

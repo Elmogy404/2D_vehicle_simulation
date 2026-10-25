@@ -4,22 +4,20 @@ from __future__ import annotations
 
 import argparse
 import csv
-import io
 from pathlib import Path
-import zipfile
-from unittest.mock import patch
-
-from stable_baselines3 import PPO
-import torch
 
 from godot_gym_env import GodotRoadEnv
+from policy_checkpoint import load_policy, checkpoint_generator
+from training_metrics import summarize_evaluation, evaluation_gate
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="Saved Stable-Baselines3 PPO model")
     parser.add_argument("--episodes", type=int, default=50)
-    parser.add_argument("--seed", type=int, default=10_000)
+    parser.add_argument("--seed", type=int, default=1_000_000)
+    parser.add_argument("--all-stages", action="store_true", help="Evaluate all eight tiers on independent holdout seeds")
+    parser.add_argument("--min-stage-episodes", type=int, default=16)
     parser.add_argument(
         "--curriculum-stage",
         type=int,
@@ -39,6 +37,7 @@ def main() -> None:
         help="Open the Godot Setup 2 world window while evaluating the policy",
     )
     parser.add_argument("--godot", help="Godot 4 executable; defaults to GODOT_BIN/PATH")
+    parser.add_argument("--generator-type", choices=["original", "segmented"])
     arguments = parser.parse_args()
     if arguments.episodes < 1:
         parser.error("--episodes must be at least 1")
@@ -48,31 +47,17 @@ def main() -> None:
         parser.error("--success-threshold must be between 0 and 1")
 
     model_path = Path(arguments.model)
-    # SB3 passes ZIP members directly to torch.load. On this Windows/PyTorch
-    # combination, torch's archive reader rejects ZipExtFile even though the
-    # checkpoint is valid; buffering each member makes the reader seekable.
-    original_torch_load = torch.load
-
-    def load_buffered_zip_member(
-        file_object: object,
-        *args: object,
-        **kwargs: object,
-    ) -> object:
-        if isinstance(file_object, zipfile.ZipExtFile):
-            file_object = io.BytesIO(file_object.read())
-        return original_torch_load(file_object, *args, **kwargs)
-
-    with patch.object(torch, "load", side_effect=load_buffered_zip_member):
-        model = PPO.load(model_path, device="cpu")
-    env = GodotRoadEnv(arguments.godot, visible=arguments.visible)
+    model = load_policy(model_path)
+    env = GodotRoadEnv(arguments.godot, visible=arguments.visible, generator_type=checkpoint_generator(model_path, arguments.generator_type))
     results: list[dict[str, float | bool]] = []
     try:
         for episode in range(arguments.episodes):
+            stage = episode % 8 if arguments.all_stages else arguments.curriculum_stage
             observation, _info = env.reset(
                 seed=arguments.seed + episode,
                 options={
                     "curriculum": False,
-                    "curriculum_stage": arguments.curriculum_stage,
+                    "curriculum_stage": stage,
                 },
             )
             episode_return = 0.0
@@ -88,7 +73,7 @@ def main() -> None:
             results.append(
                 {
                     "seed": arguments.seed + episode,
-                    "curriculum_stage": arguments.curriculum_stage,
+                    "curriculum_stage": stage,
                     "success": bool(final_info.get("success", False)),
                     "crashed": bool(final_info.get("crashed", False)),
                     "off_road": bool(final_info.get("off_road", False)),
@@ -152,6 +137,11 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(results)
         print(f"Episode metrics saved to {output_path}")
+    if arguments.all_stages:
+        summary = summarize_evaluation([dict(x, stage=x["curriculum_stage"]) for x in results])
+        for stage in summary["stages"]:
+            print(f"STAGE {stage['stage']}: {stage.get('successes', 0)}/{stage.get('episodes', 0)} goals; 95% interval={stage.get('success_interval')}")
+        print("ALL-STAGE GATE:", evaluation_gate(summary, arguments.success_threshold, arguments.min_stage_episodes))
 
 
 if __name__ == "__main__":

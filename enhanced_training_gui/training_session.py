@@ -17,15 +17,14 @@ AI_DIR = Path(__file__).resolve().parents[1] / "ai"
 if str(AI_DIR) not in sys.path:
     sys.path.insert(0, str(AI_DIR))
 from godot_bridge import find_godot
+from training_config import TRAINING_DEFAULTS, run_exists
+from policy_checkpoint import manifest_for_model
 from godot_gym_env import ENVIRONMENT_VERSION
 from gui_train_launcher import process_is_running
 from training_control import DEFAULT_REWARD_CONFIG, parse_reward_config, write_json_atomic
 
 ACTIVE = {"starting", "running", "paused", "stopping", "saving"}
-DEFAULTS = dict(run_name="", resume="", output_root="", steps=1_000_000, workers=1, seed=7,
-    learning_rate=0.0003, batch_size=64, gamma=0.999, entropy_coefficient=0.01,
-    checkpoint_every=10240, eval_every=50000, eval_episodes=64, eval_workers=4,
-    eval_seed=10000, success_threshold=0.9, early_stop_patience=3, torch_threads=1)
+DEFAULTS = dict(TRAINING_DEFAULTS)
 
 
 def read_json(path: Path) -> dict:
@@ -60,37 +59,38 @@ def default_godot(root: Path) -> str:
 def resume_settings(checkpoint: str | Path) -> dict:
     path = Path(checkpoint).resolve()
     folder = path.parent.parent if path.parent.name == "checkpoints" else path.parent
-    matches = [p for p in folder.glob("*_training_config.json")
-               if path.stem == p.name.removesuffix("_training_config.json")
-               or path.stem.startswith(p.name.removesuffix("_training_config.json") + "_")]
-    if not matches:
+    manifest_path, manifest = manifest_for_model(path)
+    if manifest_path is None:
         raise ValueError("No training configuration was found beside this checkpoint. Keep its original run name and settings manually.")
-    manifest_path = max(matches, key=lambda p: len(p.name))
-    manifest = read_json(manifest_path)
     if manifest.get("environment_version") != ENVIRONMENT_VERSION:
         raise ValueError("This checkpoint belongs to an older environment. Start a fresh version 3 run.")
     result = {key: manifest[key] for key in
         ("workers", "learning_rate", "batch_size", "gamma", "entropy_coefficient")}
     evaluation = manifest["evaluation"]
     result.update(run_name=manifest_path.name.removesuffix("_training_config.json"),
+        generator_type=manifest.get("generator_type", "original"),
         resume=str(path), output_root=str(folder.parent), rewards=manifest["reward_config"],
         eval_seed=evaluation["seed"], eval_episodes=evaluation["episodes"],
         success_threshold=evaluation["threshold"])
+    result.update({key: value for key, value in manifest.get("training_options", {}).items() if key in DEFAULTS})
     return result
 
 
 def validate_settings(root: Path, raw: dict) -> dict:
     config = dict(DEFAULTS, **raw)
+    if config["generator_type"] not in {"original", "segmented"}:
+        raise ValueError("Choose original or segmented for the road generator.")
     for key in DEFAULTS:
         if config[key] == "" and key not in {"run_name", "resume", "output_root"}:
             config[key] = DEFAULTS[key]
     for key in ("steps", "workers", "seed", "batch_size", "checkpoint_every", "eval_every",
-                "eval_episodes", "eval_workers", "eval_seed", "early_stop_patience", "torch_threads"):
+                "eval_episodes", "eval_workers", "eval_seed", "early_stop_patience", "torch_threads",
+                "min_eval_stage_episodes", "final_eval_episodes", "final_eval_seed"):
         try:
             config[key] = int(str(config[key]))
         except (ValueError, TypeError):
             raise ValueError(f"{key.replace('_', ' ').title()} must be a whole number.") from None
-        minimum = 0 if key in {"eval_every", "early_stop_patience", "seed", "eval_seed"} else 1
+        minimum = 0 if key in {"eval_every", "early_stop_patience", "seed", "eval_seed", "final_eval_episodes"} else 1
         if config[key] < minimum:
             raise ValueError(f"{key.replace('_', ' ').title()} must be at least {minimum}.")
     if config["eval_workers"] > 32 or config["torch_threads"] > 64:
@@ -127,7 +127,7 @@ def validate_settings(root: Path, raw: dict) -> dict:
         config["resume"] = str(path)
     else:
         models = Path(config["output_root"]) / "models"
-        if any(models.glob(name + ".zip")) or (models / f"{name}_training_config.json").exists():
+        if run_exists(models, name):
             raise ValueError("This run name already exists. Choose a new name or resume its checkpoint.")
     return config
 
@@ -211,7 +211,9 @@ class TrainingSession:
                 ("checkpoint-every", "checkpoint_every"), ("eval-every", "eval_every"),
                 ("eval-episodes", "eval_episodes"), ("eval-workers", "eval_workers"), ("eval-seed", "eval_seed"),
                 ("success-threshold", "success_threshold"), ("early-stop-patience", "early_stop_patience"),
-                ("torch-threads", "torch_threads"), ("run-name", "run_name"), ("output-root", "output_root")):
+                ("torch-threads", "torch_threads"), ("run-name", "run_name"), ("output-root", "output_root"),
+                ("generator-type", "generator_type"), ("min-eval-stage-episodes", "min_eval_stage_episodes"),
+                ("final-eval-episodes", "final_eval_episodes"), ("final-eval-seed", "final_eval_seed")):
                 args += ["--" + option, str(config[key])]
             args += ["--reward-config-file", str(rewards), "--status-file", str(self.status_path),
                      "--control-file", str(self.control_path), "--run-id", run_id, "--gui-log-path", str(log)]

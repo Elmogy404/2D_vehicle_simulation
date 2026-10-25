@@ -38,3 +38,12 @@ def summarize_evaluation(outcomes: list[dict]) -> dict:
     result["longest_stage_success_rate"] = result["stages"][7].get("success_rate", 0.0)
     result["longest_stage_turn_coverage"] = result["stages"][7].get("turn_coverage", 0.0)
     return result
+
+
+def evaluation_gate(summary: dict, threshold: float, minimum_per_stage: int = 16) -> bool:
+    """An overall average cannot conceal an untested or failing difficulty tier."""
+    stages = summary.get("stages", [])
+    return (len(stages) == 8 and summary.get("success_rate", 0.0) >= threshold
+            and all(stage.get("episodes", 0) >= minimum_per_stage
+                    and stage.get("success_rate", 0.0) >= threshold
+                    and stage.get("turn_coverage", 0.0) >= threshold for stage in stages))

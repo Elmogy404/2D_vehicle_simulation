@@ -11,18 +11,9 @@ import time
 from typing import Any
 
 
-DEFAULT_REWARD_CONFIG: dict[str, float] = {
-    "progress_gain": 1.0,
-    "max_speed_reward": 0.0,
-    "lane_penalty": 0.12,
-    "edge_penalty": 0.6,
-    "heading_penalty": 0.08,
-    "step_penalty": 0.01,
-    "crash_penalty": 35.0,
-    "off_road_penalty": 35.0,
-    "goal_reward": 40.0,
-    "timeout_penalty": 20.0,
-}
+from training_config import REWARD_DEFAULTS
+
+DEFAULT_REWARD_CONFIG: dict[str, float] = dict(REWARD_DEFAULTS)
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any], *, attempts: int = 6) -> None:

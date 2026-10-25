@@ -10,40 +10,18 @@ from pathlib import Path
 
 from godot_gym_env import ENVIRONMENT_VERSION, GodotRoadEnv
 from training_control import TrainingControl, parse_reward_config
+from training_config import TRAINING_DEFAULTS, prepare_manifest, runtime_provenance
+from policy_checkpoint import load_policy as load_sb3_checkpoint
 
 
-def load_sb3_checkpoint(path: str, env: object) -> object:
-    """Load SB3 weights safely from a ZIP member on the local Windows/PyTorch runtime."""
-    import io
-    import zipfile
-    from unittest.mock import patch
-
-    import torch
-    from stable_baselines3 import PPO
-
-    original_torch_load = torch.load
-
-    def load_buffered_zip_member(
-        file_object: object,
-        *args: object,
-        **kwargs: object,
-    ) -> object:
-        if isinstance(file_object, zipfile.ZipExtFile):
-            file_object = io.BytesIO(file_object.read())
-        return original_torch_load(file_object, *args, **kwargs)
-
-    with patch.object(torch, "load", side_effect=load_buffered_zip_member):
-        return PPO.load(path, env=env, device="cpu")
-
-
-def make_training_env(godot_executable: str | None, reward_config: dict[str, float], *,
+def make_training_env(godot_executable: str | None, reward_config: dict[str, float], generator_type: str = "original", *,
                       parent_window_id: int | None = None) -> object:
     from stable_baselines3.common.monitor import Monitor
 
     if parent_window_id is None:
-        return Monitor(GodotRoadEnv(godot_executable, reward_config=reward_config))
+        return Monitor(GodotRoadEnv(godot_executable, reward_config=reward_config, generator_type=generator_type))
     return Monitor(GodotRoadEnv(godot_executable, reward_config=reward_config, visible=True,
-                               parent_window_id=parent_window_id, close_visible_on_exit=True))
+                               parent_window_id=parent_window_id, close_visible_on_exit=True, generator_type=generator_type))
 
 
 def capture_training_state(model: object) -> None:
@@ -77,6 +55,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=1_000_000)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--n-envs", type=int, default=1, help="Parallel Godot training worlds")
+    parser.add_argument("--generator-type", choices=["original", "segmented"], default="original")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--gamma", type=float, default=0.999)
@@ -93,10 +72,13 @@ def main() -> None:
     parser.add_argument(
         "--eval-episodes",
         type=int,
-        default=64,
+        default=128,
         help="Mixed-tier deterministic episodes per checkpoint evaluation",
     )
     parser.add_argument("--eval-seed", type=int, default=10_000)
+    parser.add_argument("--min-eval-stage-episodes", type=int, default=16)
+    parser.add_argument("--final-eval-episodes", type=int, default=256, help="Independent final holdout episodes; 0 disables")
+    parser.add_argument("--final-eval-seed", type=int, default=1_000_000)
     parser.add_argument("--success-threshold", type=float, default=0.9)
     parser.add_argument(
         "--early-stop-patience",
@@ -120,6 +102,8 @@ def main() -> None:
     parser.add_argument("--run-id", default="cli", help="Unique ID guarding GUI control commands")
     parser.add_argument("--output-root", help="Directory for models and evaluation logs; defaults to ai/")
     parser.add_argument("--visual-parents", help="JSON file listing one native GUI parent window ID per training worker")
+    parser.set_defaults(**{("n_envs" if key == "workers" else key): value for key, value in TRAINING_DEFAULTS.items()
+                           if key not in {"run_name", "resume", "output_root"}})
     arguments = parser.parse_args()
     visual_parents = None
     if arguments.visual_parents:
@@ -168,6 +152,11 @@ def main() -> None:
         parser.error("--eval-every must be zero (disabled) or positive")
     if arguments.eval_episodes < 1:
         parser.error("--eval-episodes must be at least 1")
+    if arguments.min_eval_stage_episodes < 1 or arguments.final_eval_episodes < 0:
+        parser.error("evaluation sample limits must be positive (final evaluation may be zero)")
+    if arguments.final_eval_episodes and max(arguments.eval_seed, arguments.final_eval_seed) < min(
+            arguments.eval_seed + arguments.eval_episodes, arguments.final_eval_seed + arguments.final_eval_episodes):
+        parser.error("final holdout seeds must not overlap the checkpoint-selection seeds")
     if arguments.early_stop_patience < 0:
         parser.error("--early-stop-patience must be zero (disabled) or positive")
     if arguments.eval_every == 0 and arguments.early_stop_patience > 0:
@@ -188,6 +177,7 @@ def main() -> None:
     manifest_path = model_dir / f"{arguments.run_name}_training_config.json"
     manifest = {
         "environment_version": ENVIRONMENT_VERSION,
+        "generator_type": arguments.generator_type,
         "workers": arguments.n_envs,
         "evaluation": {"seed": arguments.eval_seed, "episodes": arguments.eval_episodes, "threshold": arguments.success_threshold},
         "reward_config": reward_config,
@@ -196,17 +186,13 @@ def main() -> None:
         "gamma": arguments.gamma,
         "entropy_coefficient": arguments.entropy_coefficient,
     }
-    if arguments.resume and manifest_path.exists():
-        previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if previous_manifest != manifest:
-            parser.error(
-                "resume settings or environment version differ from this run's saved settings; "
-                "keep the original values or start a new run"
-            )
-    elif arguments.resume:
-        print("Warning: no run manifest exists; reward/PPO settings cannot be verified.", flush=True)
-    else:
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    manifest["runtime"] = runtime_provenance()
+    manifest["training_options"] = {key: getattr(arguments, "n_envs" if key == "workers" else key)
+                                    for key in TRAINING_DEFAULTS if key not in {"run_name", "resume", "output_root"}}
+    try:
+        prepare_manifest(manifest_path, manifest, resume=bool(arguments.resume))
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
     checkpoint_dir = model_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     runs_dir = output_root / "runs"
@@ -228,13 +214,13 @@ def main() -> None:
     rollout_steps = ((rollout_steps + alignment - 1) // alignment) * alignment
     try:
         if arguments.n_envs == 1:
-            env = (make_training_env(arguments.godot, reward_config, parent_window_id=visual_parents[0])
-                   if visual_parents else make_training_env(arguments.godot, reward_config))
+            env = (make_training_env(arguments.godot, reward_config, arguments.generator_type, parent_window_id=visual_parents[0])
+                   if visual_parents else make_training_env(arguments.godot, reward_config, arguments.generator_type))
         else:
             env = SubprocVecEnv(
-                [partial(make_training_env, arguments.godot, reward_config, parent_window_id=parent)
+                [partial(make_training_env, arguments.godot, reward_config, arguments.generator_type, parent_window_id=parent)
                  for parent in visual_parents] if visual_parents else
-                [partial(make_training_env, arguments.godot, reward_config) for _ in range(arguments.n_envs)],
+                [partial(make_training_env, arguments.godot, reward_config, arguments.generator_type) for _ in range(arguments.n_envs)],
                 start_method="spawn",
             )
     except Exception as error:
@@ -273,7 +259,7 @@ def main() -> None:
 
         callback, evaluation_env = make_callbacks(
             arguments, control, model, model_dir, runs_dir, capture_training_state,
-            partial(make_training_env, arguments.godot, reward_config),
+            partial(make_training_env, arguments.godot, reward_config, arguments.generator_type),
         )
         model.learn(
             total_timesteps=remaining_steps,
@@ -286,6 +272,14 @@ def main() -> None:
         capture_training_state(model)
         model.save(output)
         control.metrics["last_model_path"] = str(output) + ".zip"
+        if evaluation_env is not None and arguments.final_eval_episodes and not control.stop_requested:
+            # Evaluate the selected best model, not the potentially worse final
+            # update. This suite must never feed back into model selection.
+            best = model_dir / f"{arguments.run_name}_best.zip"
+            heldout_model = load_sb3_checkpoint(str(best), None) if best.exists() else model
+            evaluation_env.model = heldout_model
+            evaluation_env.num_timesteps = model.num_timesteps
+            evaluation_env.evaluate(holdout=True)
         control.metrics["phase"] = "finished"
         print(f"Saved PPO policy to {output}.zip")
         control.write_status(
