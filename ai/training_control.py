@@ -1,0 +1,171 @@
+"""File-based control and status for training launched from the Godot GUI."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+import time
+from typing import Any
+
+
+from training_config import REWARD_DEFAULTS
+
+DEFAULT_REWARD_CONFIG: dict[str, float] = dict(REWARD_DEFAULTS)
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any], *, attempts: int = 6) -> None:
+    """Publish complete JSON, allowing Windows readers time to close the file."""
+    content = json.dumps(payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    try:
+        for attempt in range(attempts):
+            try:
+                temporary.write_text(content, encoding="utf-8")
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                # A Godot/antivirus reader may briefly deny delete sharing.
+                # Retain the old complete status until replacement succeeds.
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(min(0.005 * 2**attempt, 0.05))
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def parse_reward_config(raw: str | None) -> dict[str, float]:
+    """Validate GUI/CLI reward overrides without accepting unknown settings."""
+    result = DEFAULT_REWARD_CONFIG.copy()
+    if not raw:
+        return result
+    supplied = json.loads(raw)
+    if not isinstance(supplied, dict):
+        raise ValueError("--reward-config must be a JSON object")
+    for key, value in supplied.items():
+        if key not in result:
+            raise ValueError(f"Unknown reward setting: {key}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"Reward setting {key} must be numeric")
+        number = float(value)
+        if not 0.0 <= number <= 1000.0 or number != number:
+            raise ValueError(f"Reward setting {key} must be finite and between 0 and 1000")
+        result[key] = number
+    return result
+
+
+class TrainingControl:
+    def __init__(
+        self,
+        control_file: str | None,
+        status_file: str | None,
+        run_id: str,
+        run_name: str,
+        total_steps: int,
+        workers: int,
+        log_path: str = "",
+    ) -> None:
+        self.control_file = Path(control_file) if control_file else None
+        self.status_file = Path(status_file) if status_file else None
+        self.run_id = run_id
+        self.run_name = run_name
+        self.total_steps = total_steps
+        self.workers = workers
+        self.log_path = log_path
+        self.state = "starting"
+        self.stop_requested = False
+        self.last_reported_steps = -1
+        self.last_evaluation: dict[str, Any] = {}
+        self.message = "Starting PPO training"
+        self.metrics: dict[str, Any] = {}
+        self.last_status_time = 0.0
+        self.last_command_time = 0.0
+        self.cached_command = "run"
+        self.paused_seconds = 0.0
+        self.last_status_warning = float("-inf")
+
+    def write_status(self, state: str, timesteps: int, message: str = "") -> bool:
+        self.state = state
+        if message:
+            self.message = message
+        if self.status_file is None:
+            return True
+        payload = {
+            "run_id": self.run_id,
+            "pid": os.getpid(),
+            "python_path": sys.executable,
+            "state": state,
+            "timesteps": timesteps,
+            "total_steps": self.total_steps,
+            "workers": self.workers,
+            "run_name": self.run_name,
+            "log_path": self.log_path,
+            "message": self.message,
+            "last_evaluation": self.last_evaluation,
+            "updated_at": time.time(),
+        }
+        payload.update(self.metrics)
+        try:
+            terminal = state in {"completed", "stopped", "failed"}
+            write_json_atomic(self.status_file, payload, attempts=15 if terminal else 6)
+            return True
+        except OSError as error:
+            # Telemetry is optional: an unavailable GUI file must never abort
+            # learning, prevent a clean stop, or interrupt a model save.
+            now = time.monotonic()
+            if now - self.last_status_warning >= 30.0:
+                logging.getLogger(__name__).warning("GUI status update deferred; continuing without this update: %s", error)
+                self.last_status_warning = now
+            return False
+
+    def _command(self) -> str:
+        if self.control_file is None:
+            return "run"
+        try:
+            payload = json.loads(self.control_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # The GUI may be between truncating and rewriting the small file.
+            return "pause" if self.state == "paused" else "run"
+        if not isinstance(payload, dict) or payload.get("run_id") != self.run_id:
+            return "run"
+        command = str(payload.get("command", "run"))
+        return command if command in {"run", "pause", "stop"} else "run"
+
+    def poll(self, timesteps: int) -> bool:
+        now = time.monotonic()
+        if now - self.last_command_time >= 0.1 or self.state != "running":
+            self.cached_command = self._command()
+            self.last_command_time = now
+        command = self.cached_command
+        if command == "stop":
+            self.stop_requested = True
+            self.write_status("stopping", timesteps, "Saving the current model and stopping")
+            return False
+        if command == "pause":
+            pause_started = time.monotonic()
+            last_pause_status = pause_started
+            self.write_status("paused", timesteps, "Training paused; workers are idle")
+            while command == "pause":
+                time.sleep(0.2)
+                command = self._command()
+                if command == "pause" and time.monotonic() - last_pause_status >= 1.0:
+                    self.write_status("paused", timesteps)
+                    last_pause_status = time.monotonic()
+            self.paused_seconds += time.monotonic() - pause_started
+            self.cached_command = command
+            if command == "stop":
+                self.stop_requested = True
+                self.write_status("stopping", timesteps, "Saving the current model and stopping")
+                return False
+            self.write_status("running", timesteps, "Training resumed")
+        elif now - self.last_status_time >= 0.5 or self.state != "running":
+            self.write_status("running", timesteps, "Training in progress")
+            self.last_reported_steps = timesteps
+            self.last_status_time = now
+        return True

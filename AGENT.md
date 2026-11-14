@@ -1,8 +1,10 @@
-Before continuing to the traffic-light/intersection work, I want to add a few gameplay and simulation changes to the current stable Step 1.
+# Historical Step 1 implementation brief
 
-Do NOT start Step 2 yet.
-
-Implement the following changes while preserving the current Step 1 architecture and tests.
+This file records the original Step 1 acceptance criteria. They have since
+been implemented, and the project has moved on to traffic, intersections,
+segmented road generation, and PPO training. The old instruction to postpone
+Step 2 is no longer applicable. For current behavior, see `ENVIRONMENT.md`,
+`AI_ROADMAP.md`, and `ai/README.md`.
 
 # CHANGE 1 — Variable NPC Speeds
 

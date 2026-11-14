@@ -9,6 +9,9 @@ var expanded: bool = false
 
 func _ready() -> void:
 	layer = 2
+	# The M-key expand control remains usable while the startup/settings modal
+	# pauses the simulation tree.
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	view = MINIMAP_VIEW.new()
 	view.name = "View"
 	add_child(view)

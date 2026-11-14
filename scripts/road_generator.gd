@@ -15,9 +15,7 @@ const JUNCTION_EDGE_CLEARANCE := 4.0
 @export var segment_length: float = 60.0
 
 @export_category("Road Complexity")
-@export var minimum_road_width: float = 190.0
 @export var maximum_road_width: float = 280.0
-@export var width_change_smoothing: float = 0.16
 @export_range(5, 8, 1) var intersection_count: int = 6
 ## Distance across the whole district between the two collector roads. This
 ## leaves real block space between a six-lane arterial and local streets.
@@ -31,7 +29,6 @@ const JUNCTION_EDGE_CLEARANCE := 4.0
 @export var roundabout_radius: float = 125.0
 @export_range(1, 5, 1) var turnaround_count: int = 2
 @export var turnaround_width: float = 360.0
-@export_range(1, 3, 1) var minimum_lanes_per_direction: int = 1
 @export_range(1, 3, 1) var maximum_lanes_per_direction: int = 3
 @export var lane_width: float = 90.0
 @export var shoulder_width: float = 10.0
@@ -91,6 +88,10 @@ const JUNCTION_EDGE_CLEARANCE := 4.0
 
 ## Press R while the game is running to generate a new random road.
 @export var enable_hotkeys: bool = true
+## The simulation's generator router disables this and requests generation
+## explicitly after the user chooses a road-generation mode.
+@export var generate_on_ready: bool = true
+@export var build_visuals: bool = true
 
 
 # ============================================================
@@ -175,7 +176,8 @@ var steer_hold: int = 0
 # ============================================================
 
 func _ready() -> void:
-	generate_road()
+	if generate_on_ready:
+		generate_road()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -243,17 +245,23 @@ func generate_road() -> void:
 		route_half_widths.append(width * 0.5)
 
 	route.build(center_points, route_half_widths, lane_profile, lane_width)
-	road_network.build(get_map_paths(), get_map_path_half_width_profiles())
+	var network_classes := PackedStringArray(["arterial"])
+	network_classes.append_array(secondary_path_classes)
+	var network_lane_profiles: Array[PackedFloat32Array] = []
+	road_network.build(get_map_paths(), get_map_path_half_width_profiles(), network_lane_profiles, network_classes)
 
-	build_road_polygon()
+	if build_visuals:
+		build_road_polygon()
 	# Lay the continuous main-road curbs before side-street asphalt. Junction
 	# surfaces then mask only the real overlap at each road mouth, instead of
 	# deleting several whole arterial segments around every intersection.
-	build_boundary_visuals()
+	if build_visuals:
+		build_boundary_visuals()
 	build_cross_streets()
 	build_obstacles()
-	build_lane_markings()
-	build_debug_centerline()
+	if build_visuals:
+		build_lane_markings()
+		build_debug_centerline()
 	build_collisions()
 
 	road_regenerated.emit()
@@ -1363,36 +1371,37 @@ func build_obstacles() -> void:
 		var center: Vector2 = region["center"]
 		var size: Vector2 = region["size"]
 		var rotation: float = region["rotation"]
-		var points := _rectangle_points(center, size, rotation)
+		if build_visuals:
+			var points := _rectangle_points(center, size, rotation)
 
-		var area := Polygon2D.new()
-		area.name = "Obstacle_%02d" % region_index
-		area.color = Color(0.15, 0.36, 0.18)
-		area.polygon = points
-		container.add_child(area)
+			var area := Polygon2D.new()
+			area.name = "Obstacle_%02d" % region_index
+			area.color = Color(0.15, 0.36, 0.18)
+			area.polygon = points
+			container.add_child(area)
 
-		var outline := Line2D.new()
-		outline.width = 5.0
-		outline.default_color = Color(0.30, 0.55, 0.31)
-		outline.antialiased = true
-		outline.closed = true
-		for point in points:
-			outline.add_point(point)
-		container.add_child(outline)
+			var outline := Line2D.new()
+			outline.width = 5.0
+			outline.default_color = Color(0.30, 0.55, 0.31)
+			outline.antialiased = true
+			outline.closed = true
+			for point in points:
+				outline.add_point(point)
+			container.add_child(outline)
 
-		var label := Label.new()
-		label.name = "ObstacleLabel_%02d" % region_index
-		label.text = String(region["label"])
-		label.position = center - size * 0.5
-		label.size = size
-		label.pivot_offset = size * 0.5
-		label.rotation = rotation
-		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		label.add_theme_font_size_override("font_size", 34)
-		label.add_theme_color_override("font_color", Color(0.88, 0.96, 0.86))
-		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		container.add_child(label)
+			var label := Label.new()
+			label.name = "ObstacleLabel_%02d" % region_index
+			label.text = String(region["label"])
+			label.position = center - size * 0.5
+			label.size = size
+			label.pivot_offset = size * 0.5
+			label.rotation = rotation
+			label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			label.add_theme_font_size_override("font_size", 34)
+			label.add_theme_color_override("font_color", Color(0.88, 0.96, 0.86))
+			label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			container.add_child(label)
 
 		var body := StaticBody2D.new()
 		body.name = "ObstacleBody_%02d" % region_index
@@ -1465,15 +1474,16 @@ func _build_secondary_network(container: Node) -> void:
 			if segment.length_squared() < 1.0:
 				continue
 			var direction := segment.normalized()
-			var strip := Polygon2D.new()
-			strip.color = Color(0.115, 0.115, 0.115)
-			strip.polygon = PackedVector2Array([
-				left_edges[segment_index],
-				left_edges[segment_index + 1],
-				right_edges[segment_index + 1],
-				right_edges[segment_index]
-			])
-			container.add_child(strip)
+			if build_visuals:
+				var strip := Polygon2D.new()
+				strip.color = Color(0.115, 0.115, 0.115)
+				strip.polygon = PackedVector2Array([
+					left_edges[segment_index],
+					left_edges[segment_index + 1],
+					right_edges[segment_index + 1],
+					right_edges[segment_index]
+				])
+				container.add_child(strip)
 
 			if not is_ring and not _segment_inside_roundabout(start, finish):
 				var start_trim := _junction_clearance(start, half_width)
@@ -1503,6 +1513,8 @@ func _build_secondary_network(container: Node) -> void:
 							1.0 - finish_t
 						)
 						_add_wall_segment(body, edge_start, edge_finish)
+	if not build_visuals:
+		return
 	for path_index in range(secondary_paths.size()):
 		var path := secondary_paths[path_index]
 		if path.size() < 2:
@@ -1726,10 +1738,11 @@ func _build_cul_de_sac(
 	tangent: Vector2
 ) -> void:
 	var radius := cross_street_width * 0.68
-	var bulb := Polygon2D.new()
-	bulb.color = Color(0.115, 0.115, 0.115)
-	bulb.polygon = _circle_points(center, radius, 24)
-	container.add_child(bulb)
+	if build_visuals:
+		var bulb := Polygon2D.new()
+		bulb.color = Color(0.115, 0.115, 0.115)
+		bulb.polygon = _circle_points(center, radius, 24)
+		container.add_child(bulb)
 
 	var body := StaticBody2D.new()
 	body.name = "CulDeSacWalls_%d_%d" % [roundi(center.x), roundi(center.y)]
@@ -1748,15 +1761,16 @@ func _build_roundabout(
 ) -> void:
 	var outer_radius := roundabout_radius + cross_street_width * 0.5
 	var island_radius := maxf(roundabout_radius - cross_street_width * 0.5, 34.0)
-	var apron := Polygon2D.new()
-	apron.color = Color(0.115, 0.115, 0.115)
-	apron.polygon = _circle_points(center, outer_radius, 32)
-	container.add_child(apron)
+	if build_visuals:
+		var apron := Polygon2D.new()
+		apron.color = Color(0.115, 0.115, 0.115)
+		apron.polygon = _circle_points(center, outer_radius, 32)
+		container.add_child(apron)
 
-	var island := Polygon2D.new()
-	island.color = Color(0.16, 0.34, 0.16)
-	island.polygon = _circle_points(center, island_radius, 24)
-	container.add_child(island)
+		var island := Polygon2D.new()
+		island.color = Color(0.16, 0.34, 0.16)
+		island.polygon = _circle_points(center, island_radius, 24)
+		container.add_child(island)
 
 	var body := StaticBody2D.new()
 	body.name = "RoundaboutWalls_%d_%d" % [roundi(center.x), roundi(center.y)]
@@ -1783,13 +1797,14 @@ func _build_roundabout(
 	island_shape.position = center
 	body.add_child(island_shape)
 
-	var island_edge := Line2D.new()
-	island_edge.width = 4.0
-	island_edge.default_color = Color(0.92, 0.92, 0.92)
-	island_edge.closed = true
-	for point in _circle_points(center, island_radius, 24):
-		island_edge.add_point(point)
-	container.add_child(island_edge)
+	if build_visuals:
+		var island_edge := Line2D.new()
+		island_edge.width = 4.0
+		island_edge.default_color = Color(0.92, 0.92, 0.92)
+		island_edge.closed = true
+		for point in _circle_points(center, island_radius, 24):
+			island_edge.add_point(point)
+		container.add_child(island_edge)
 
 
 func _add_round_outline_openings(
@@ -1798,6 +1813,8 @@ func _add_round_outline_openings(
 	radius: float,
 	openings: Array
 ) -> void:
+	if not build_visuals:
+		return
 	var steps := 40
 	for step in range(steps):
 		var a_direction := Vector2.from_angle(TAU * float(step) / float(steps))

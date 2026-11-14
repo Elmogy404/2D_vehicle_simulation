@@ -69,7 +69,8 @@ func _ready() -> void:
 func _physics_process(_delta: float) -> void:
 	update_sensors()
 
-	queue_redraw()
+	if show_rays:
+		queue_redraw()
 
 
 # ============================================================

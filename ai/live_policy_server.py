@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import logging
 from pathlib import Path
 import socket
-import zipfile
-from unittest.mock import patch
 
 import numpy as np
 
@@ -17,20 +14,7 @@ import numpy as np
 OBSERVATION_SIZE = 31
 
 
-def load_policy(path: Path):
-    """Load a local SB3 archive with the compatibility used by our eval tools."""
-    import torch
-    from stable_baselines3 import PPO
-
-    original_torch_load = torch.load
-
-    def load_buffered_zip_member(file_object, *args, **kwargs):
-        if isinstance(file_object, zipfile.ZipExtFile):
-            file_object = io.BytesIO(file_object.read())
-        return original_torch_load(file_object, *args, **kwargs)
-
-    with patch.object(torch, "load", side_effect=load_buffered_zip_member):
-        return PPO.load(path, device="cpu")
+from policy_checkpoint import load_policy
 
 
 def parse_args() -> argparse.Namespace:

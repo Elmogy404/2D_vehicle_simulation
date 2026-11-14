@@ -29,6 +29,8 @@ def main() -> None:
 
     with GodotBridge(arguments.godot) as bridge:
         reset_result = bridge.request({"type": "reset", "seed": arguments.seed})
+        if not reset_result["info"].get("spawn_clear", False):
+            raise RuntimeError("Training reset did not produce a collision-free spawn")
         observation = reset_result["observation"]
         if len(observation) != EXPECTED_OBSERVATION_SIZE:
             raise RuntimeError(f"Expected 31 observations, got {len(observation)}")
@@ -60,7 +62,8 @@ def main() -> None:
         repeated_reset = bridge.request({"type": "reset", "seed": arguments.seed})
         if repeated_reset["observation"] != observation:
             raise RuntimeError("Resetting with the same seed changed the initial observation")
-        if repeated_reset["info"] != reset_result["info"]:
+        stable = lambda info: {k: v for k, v in info.items() if k != "reset_ms"}
+        if stable(repeated_reset["info"]) != stable(reset_result["info"]):
             raise RuntimeError("Resetting with the same seed changed episode route metadata")
         print("DETERMINISM PASS: same seed reproduces the route and initial observation")
 
@@ -73,6 +76,8 @@ def main() -> None:
                 }
             )
             stage_distance = float(stage_reset["info"]["goal_distance"])
+            if not stage_reset["info"].get("spawn_clear", False):
+                raise RuntimeError(f"Stage {stage} spawned in an obstructed position")
             if int(stage_reset["info"]["curriculum_stage"]) != stage:
                 raise RuntimeError(f"Requested curriculum stage {stage} was not applied")
             if not minimum_distance <= stage_distance <= maximum_distance:
@@ -105,6 +110,21 @@ def main() -> None:
             if result["terminated"] or result["truncated"]:
                 break
         print(f"STEP PASS: {step_index + 1} actions, accumulated reward={total_reward:.3f}")
+
+        from training_control import DEFAULT_REWARD_CONFIG
+
+        zero_rewards = {key: 0.0 for key in DEFAULT_REWARD_CONFIG}
+        bridge.request(
+            {
+                "type": "reset",
+                "seed": arguments.seed,
+                "options": {"reward_config": zero_rewards},
+            }
+        )
+        zero_step = bridge.request({"type": "step", "action": [0.0, 0.0]})
+        if abs(float(zero_step["reward"])) > 1e-6:
+            raise RuntimeError("Custom reward weights were not applied to the training world")
+        print("REWARD CONFIG PASS: zeroed weights produce zero reward")
 
 
 if __name__ == "__main__":

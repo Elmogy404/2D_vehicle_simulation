@@ -15,6 +15,10 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+class ResetUnavailableError(RuntimeError):
+    """A generated map has no validated trip; another seed may be tried."""
+
+
 def find_godot(executable: str | None = None) -> str:
     """Resolve Godot from an explicit path, GODOT_BIN, or PATH."""
     candidate = executable or os.environ.get("GODOT_BIN")
@@ -41,15 +45,24 @@ def find_godot(executable: str | None = None) -> str:
 class GodotBridge:
     """Request/response transport for the RL training scene (no ML deps)."""
 
+    @property
+    def process_id(self) -> int | None:
+        return self._process.pid if self._process is not None else None
+
     def __init__(
         self,
         godot_executable: str | None = None,
         project_root: Path = PROJECT_ROOT,
         startup_timeout: float = 45.0,
         visible: bool = False,
+        parent_window_id: int | None = None,
+        close_visible_on_exit: bool = False,
     ) -> None:
+        if parent_window_id is not None and (not visible or parent_window_id <= 0):
+            raise ValueError("Embedded training requires visible mode and a positive parent window ID")
         self.project_root = Path(project_root).resolve()
         self.visible = visible
+        self.close_visible_on_exit = close_visible_on_exit
         self._socket: socket.socket | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self._log_handle: Any = None
@@ -69,7 +82,12 @@ class GodotBridge:
         port = listener.getsockname()[1]
         command = [godot]
         if not visible:
-            command.append("--headless")
+            command.extend(["--headless", "--fixed-fps", "60", "--disable-render-loop"])
+        elif parent_window_id is not None:
+            command.extend(["--wid", str(parent_window_id), "--resolution", "480x270",
+                            "--position", "-32000,-32000",
+                            "--rendering-method", "gl_compatibility", "--audio-driver", "Dummy",
+                            "--single-window", "--max-fps", "60"])
         command.extend(
             [
                 "--path",
@@ -83,6 +101,10 @@ class GodotBridge:
         )
         if visible:
             command.append("--visible")
+        if close_visible_on_exit:
+            command.append("--owned-training-view")
+        if parent_window_id is not None:
+            command.append("--embedded-training-view")
         self._log_handle = self.log_path.open("wb")
         try:
             self._process = subprocess.Popen(
@@ -93,6 +115,7 @@ class GodotBridge:
                 stderr=subprocess.STDOUT,
             )
             connection, _address = listener.accept()
+            connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             connection.settimeout(startup_timeout)
             self._socket = connection
         except Exception:
@@ -120,6 +143,8 @@ class GodotBridge:
         self._receive_buffer = bytearray(remainder)
         response = json.loads(line.decode("utf-8"))
         if "error" in response:
+            if response.get("recoverable_reset"):
+                raise ResetUnavailableError(f"Godot training world: {response['error']}")
             raise RuntimeError(f"Godot training world: {response['error']}")
         return response
 
@@ -139,7 +164,7 @@ class GodotBridge:
             except OSError:
                 pass
             self._socket = None
-        if self.visible:
+        if self.visible and not self.close_visible_on_exit:
             # In monitor mode the Godot window belongs to the user after the
             # evaluator exits; its close button ends the visible process.
             self._process = None

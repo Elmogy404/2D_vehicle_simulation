@@ -124,6 +124,12 @@ the Setup 2 checkpoint described below.
 
 ## Deferred decisions
 
+- [ ] **Deferred, still required:** build a simple Godot training dashboard for
+  the Python PPO trainer. It should start a fresh run or resume a checkpoint,
+  configure the step cap and parallel-world count, show progress/evaluation
+  results, and request a graceful stop at a checkpoint. Keep training worlds
+  headless and refresh the dashboard at a low rate so monitoring adds minimal
+  load. Do not drop this item; close it only after the dashboard is implemented.
 - PPO hyperparameters and training duration are initial defaults, to be tuned
   from held-out evaluation rather than assumed final.
 - Setup 1 deliberately uses forward goals on the main route to isolate basic

@@ -48,7 +48,9 @@ func _run() -> void:
 			_fail("seed %d returned a route below the requested distance" % seed_value)
 			return
 		if int(planned["turns"]) < MINIMUM_ROUTE_TURNS:
-			_fail("seed %d returned fewer than %d turns" % [seed_value, MINIMUM_ROUTE_TURNS])
+			_fail("seed %d returned %d turns over %.0f units (required %d)" % [
+				seed_value, int(planned["turns"]), float(planned["length"]), MINIMUM_ROUTE_TURNS
+			])
 			return
 		if not bool(planned["turn_requirement_met"]):
 			_fail("seed %d fell back below its requested turn count" % seed_value)

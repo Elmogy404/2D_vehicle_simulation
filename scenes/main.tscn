@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://x0t7qgybdrem"]
 
-[ext_resource type="PackedScene" uid="uid://b1f3yonajmcth" path="res://scenes/RoadGenerator.tscn" id="1_o5qli"]
+[ext_resource type="PackedScene" path="res://scenes/RoadGenerationRouter.tscn" id="1_o5qli"]
 [ext_resource type="Script" uid="uid://cqddnjwgkxvab" path="res://scripts/main.gd" id="1_sugp2"]
 [ext_resource type="PackedScene" uid="uid://ddvgxgidq8qdj" path="res://scenes/EgoVehicle.tscn" id="2_0wfyh"]
 [ext_resource type="Script" uid="uid://kebqn3apsgjn" path="res://scripts/traffic_manager.gd" id="4_jyhfs"]
@@ -13,11 +13,13 @@
 [ext_resource type="Script" path="res://scripts/pedestrian_manager.gd" id="11_pedestrians"]
 [ext_resource type="Script" path="res://scripts/minimap.gd" id="12_minimap"]
 [ext_resource type="Script" path="res://scripts/ai_mode_hud.gd" id="13_ai_hud"]
+[ext_resource type="Script" path="res://scripts/settings_popup.gd" id="14_settings"]
 
 [node name="Main" type="Node2D" unique_id=580353184]
 script = ExtResource("1_sugp2")
 
 [node name="RoadGenerator" parent="." unique_id=1032155224 instance=ExtResource("1_o5qli")]
+enable_hotkeys = false
 
 [node name="TrafficLightManager" type="Node2D" parent="."]
 script = ExtResource("10_lights")
@@ -48,3 +50,6 @@ script = ExtResource("9_state")
 
 [node name="AiModeHud" type="CanvasLayer" parent="."]
 script = ExtResource("13_ai_hud")
+
+[node name="SettingsPopup" type="CanvasLayer" parent="."]
+script = ExtResource("14_settings")

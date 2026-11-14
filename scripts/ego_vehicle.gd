@@ -3,7 +3,7 @@ extends CharacterBody2D
 
 @export_category("Vehicle")
 
-@export var max_speed: float = 300.0
+@export var max_speed: float = 500.0
 @export var acceleration: float = 250.0
 @export var braking: float = 500.0
 
