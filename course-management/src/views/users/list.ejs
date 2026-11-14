@@ -1,0 +1,58 @@
+<%- include("../partials/head", {}) %>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h4 mb-0">المستخدمون</h1>
+  <div class="d-flex gap-2 align-items-center">
+    <form class="d-flex gap-2" method="get" action="/users">
+      <input type="search" class="form-control form-control-sm" name="search" placeholder="ابحث بالاسم أو البريد…" value="<%= search || "" %>">
+      <select class="form-select form-select-sm" name="role" style="width: auto;">
+        <option value="">الكل</option>
+        <option value="ADMIN" <%= roleFilter === "ADMIN" ? "selected" : "" %>>مدير</option>
+        <option value="TRAINER" <%= roleFilter === "TRAINER" ? "selected" : "" %>>مدرب</option>
+        <option value="TRAINEE" <%= roleFilter === "TRAINEE" ? "selected" : "" %>>متدرب</option>
+      </select>
+      <button class="btn btn-sm btn-outline-secondary" type="submit">تصفية</button>
+    </form>
+    <a class="btn btn-primary btn-sm" href="/users/new">+ مستخدم جديد</a>
+  </div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr><th>#</th><th>الاسم</th><th>البريد</th><th>الدور</th><th>تاريخ الإنشاء</th><th class="text-nowrap">إجراءات</th></tr>
+      </thead>
+      <tbody>
+        <% if (users.length === 0) { %>
+          <tr><td colspan="6" class="text-center text-muted py-4">لا توجد نتائج.</td></tr>
+        <% } %>
+        <% users.forEach(function (u, idx) { %>
+          <tr>
+            <td><%= (pageCtx.page - 1) * 10 + idx + 1 %></td>
+            <td><%= u.name %></td>
+            <td><%= u.email %></td>
+            <td><span class="badge text-bg-dark"><%= t.roles[u.role] %></span></td>
+            <td class="text-nowrap"><%= new Date(u.createdAt).toISOString().slice(0, 10) %></td>
+            <td class="text-nowrap">
+              <a class="btn btn-sm btn-outline-primary" href="/users/<%= u.id %>/edit">تعديل</a>
+              <% if (currentUser.id === u.id) { %>
+                <span class="text-muted small">حسابك الحالي</span>
+              <% } else { %>
+                <form class="d-inline" method="post" action="/users/<%= u.id %>" onsubmit="return confirm('هل تريد حذف هذا المستخدم؟')">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+                  <input type="hidden" name="_method" value="DELETE">
+                  <button type="submit" class="btn btn-sm btn-outline-danger">حذف</button>
+                </form>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include("../partials/pagination", {}) %>
+
+<%- include("../partials/foot") %>

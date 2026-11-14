@@ -1,0 +1,36 @@
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+  <div class="container">
+    <a class="navbar-brand" href="/dashboard">إدارة الدورات</a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav" aria-controls="mainNav" aria-expanded="false" aria-label="القائمة">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="mainNav">
+      <ul class="navbar-nav me-0 ms-auto mb-2 mb-lg-0 align-items-lg-center gap-lg-1">
+      <% if (typeof currentUser !== "undefined" && currentUser) { %>
+        <li class="nav-item"><a class="nav-link" href="/dashboard">لوحة التحكم</a></li>
+        <% if (currentUser.role === "ADMIN") { %>
+          <li class="nav-item"><a class="nav-link" href="/users">المستخدمون</a></li>
+          <li class="nav-item"><a class="nav-link" href="/courses">الدورات</a></li>
+          <li class="nav-item"><a class="nav-link" href="/bookings">الحجوزات</a></li>
+        <% } else if (currentUser.role === "TRAINER") { %>
+          <li class="nav-item"><a class="nav-link" href="/courses">دوراتي</a></li>
+        <% } else { %>
+          <li class="nav-item"><a class="nav-link" href="/courses">الدورات</a></li>
+          <li class="nav-item"><a class="nav-link" href="/bookings/mine">حجوزاتي</a></li>
+          <li class="nav-item"><a class="nav-link" href="/my-attendance">حضوري</a></li>
+        <% } %>
+        <li class="nav-item"><span class="nav-link text-warning-emphasis"><%= currentUser.name %> (<%= t.roles[currentUser.role] %>)</span></li>
+        <li class="nav-item">
+          <form method="post" action="/logout" class="d-inline">
+            <input type="hidden" name="_csrf" value="<%= typeof csrfToken !== 'undefined' ? csrfToken : '' %>">
+            <button type="submit" class="btn btn-outline-light btn-sm">تسجيل الخروج</button>
+          </form>
+        </li>
+      <% } else { %>
+        <li class="nav-item"><a class="nav-link" href="/login">تسجيل الدخول</a></li>
+        <li class="nav-item"><a class="nav-link" href="/register">إنشاء حساب</a></li>
+      <% } %>
+      </ul>
+    </div>
+  </div>
+</nav>

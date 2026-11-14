@@ -1,0 +1,72 @@
+<%- include("../partials/head", {}) %>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h4 mb-0"><%= currentUser.role === "TRAINER" ? "دوراتي" : "الدورات" %></h1>
+  <div class="d-flex gap-2">
+    <form class="d-flex" method="get" action="/courses">
+      <input type="search" class="form-control form-control-sm" name="search" placeholder="ابحث بعنوان الدورة…" value="<%= search || "" %>">
+      <button class="btn btn-sm btn-outline-secondary ms-1" type="submit">بحث</button>
+    </form>
+    <% if (currentUser.role === "ADMIN") { %>
+      <a class="btn btn-primary btn-sm" href="/courses/new">+ دورة جديدة</a>
+    <% } %>
+  </div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>#</th>
+          <th>العنوان</th>
+          <th class="d-none d-md-table-cell">الوصف</th>
+          <th>السعر (ر.س)</th>
+          <th>المدرب</th>
+          <th>العدد</th>
+          <th class="text-nowrap">إجراءات</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% if (courses.length === 0) { %>
+          <tr><td colspan="7" class="text-center text-muted py-4">لا توجد دورات بعد.</td></tr>
+        <% } %>
+        <% courses.forEach(function (c, idx) { %>
+          <tr>
+            <td><%= (pageCtx.page - 1) * 6 + idx + 1 %></td>
+            <td>
+              <a href="/courses/<%= c.id %>" class="text-decoration-none fw-semibold"><%= c.title %></a>
+            </td>
+            <td class="d-none d-md-table-cell small text-muted"><%= c.description.slice(0, 60) %>…</td>
+            <td><%= c.price.toFixed ? c.price.toFixed(2) : String(c.price) %></td>
+            <td><%= c.trainer.name %></td>
+            <td class="small text-muted"><%= c._count.bookings %> حجز</td>
+            <td class="text-nowrap">
+              <a class="btn btn-sm btn-outline-secondary" href="/courses/<%= c.id %>">تفاصيل</a>
+              <% if (currentUser.role === "ADMIN") { %>
+                <a class="btn btn-sm btn-outline-primary" href="/courses/<%= c.id %>/edit">تعديل</a>
+                <form class="d-inline" method="post" action="/courses/<%= c.id %>" onsubmit="return confirm('هل تريد حذف هذه الدورة؟')">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+                  <input type="hidden" name="_method" value="DELETE">
+                  <button type="submit" class="btn btn-sm btn-outline-danger">حذف</button>
+                </form>
+              <% } else if (currentUser.role === "TRAINER") { %>
+                <a class="btn btn-sm btn-outline-secondary" href="/courses/<%= c.id %>/sessions">الجلسات</a>
+              <% } else { %>
+                <form class="d-inline" method="post" action="/bookings" onsubmit="return confirm('هل تريد تسجيل حجز لهذه الدورة؟')">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+                  <input type="hidden" name="courseId" value="<%= c.id %>">
+                  <button type="submit" class="btn btn-sm btn-primary">احجز</button>
+                </form>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include("../partials/pagination", {}) %>
+
+<%- include("../partials/foot") %>

@@ -1,0 +1,21 @@
+<%
+  // pagination partial: expects `pageCtx` = { page, pageCount, total, base }
+  var page = pageCtx.page, pageCount = pageCtx.pageCount, base = pageCtx.base;
+%>
+<% if (pageCount > 1) { %>
+<nav aria-label="التصفح بين الصفحات">
+  <ul class="pagination justify-content-center mt-4">
+    <li class="page-item <%= page <= 1 ? "disabled" : "" %>">
+      <a class="page-link" href="<%= base !== "" ? base + "page=" + (page - 1) : "#" %>">السابق</a>
+    </li>
+    <% for (let i = 1; i <= pageCount; i++) { %>
+      <li class="page-item <%= i === page ? "active" : "" %>">
+        <a class="page-link" href="<%= base !== "" ? base + "page=" + i : "#" %>"><%= i %></a>
+      </li>
+    <% } %>
+    <li class="page-item <%= page >= pageCount ? "disabled" : "" %>">
+      <a class="page-link" href="<%= base !== "" ? base + "page=" + (page + 1) : "#" %>">التالي</a>
+    </li>
+  </ul>
+</nav>
+<% } %>

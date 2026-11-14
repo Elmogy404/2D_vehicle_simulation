@@ -1,0 +1,56 @@
+<%- include("../partials/head", {}) %>
+
+<h1 class="h4 mb-4">لوحة التحكم — المتدرب</h1>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-4">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body">
+        <div class="h2 mb-0"><%= stats.counts.bookingsCount %></div>
+        <div class="text-muted">حجز</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card text-center shadow-sm h-100 border-success">
+      <div class="card-body">
+        <div class="h2 mb-0 text-success"><%= stats.present %></div>
+        <div class="text-muted">حضور</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card text-center shadow-sm h-100 border-danger">
+      <div class="card-body">
+        <div class="h2 mb-0 text-danger"><%= stats.absent %></div>
+        <div class="text-muted">غياب</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body">
+    <h2 class="h5 card-title">أحدث حجوزاتك</h2>
+    <% if (stats.bookings.length === 0) { %>
+      <p class="text-muted mb-0">لا توجد حجوزات بعد؛ <a href="/courses">استعرض الدورات</a> وسجّل حجزك.</p>
+    <% } else { %>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+          <thead><tr><th>الدورة</th><th>الحالة</th><th>تاريخ الحجز</th></tr></thead>
+          <tbody>
+            <% stats.bookings.forEach(function (b) { %>
+              <tr>
+                <td><%= b.course.title %></td>
+                <td><span class="badge badge-status-<%= b.status %>"><%= t.bookings.statusLabels[b.status] %></span></td>
+                <td><%= new Date(b.createdAt).toISOString().slice(0, 10) %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    <% } %>
+  </div>
+</div>
+
+<%- include("../partials/foot") %>

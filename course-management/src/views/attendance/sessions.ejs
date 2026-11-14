@@ -1,0 +1,64 @@
+<%- include("../partials/head", {}) %>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h4 mb-0">جلسات الدورة: <%= course.title %></h1>
+  <a class="btn btn-outline-secondary btn-sm" href="/courses">رجوع إلى الدورات</a>
+</div>
+
+<div class="card shadow-sm mb-4">
+  <div class="card-body">
+    <h2 class="h5 card-title">إضافة جلسة</h2>
+    <form method="post" action="/courses/<%= course.id %>/sessions" class="row g-2 novalidate">
+      <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+      <div class="col-md-5">
+        <label class="form-label small" for="session-title">عنوان الجلسة (اختياري)</label>
+        <input type="text" class="form-control <%= fieldErrors.title ? "is-invalid" : "" %>" id="session-title" name="title" autocomplete="off">
+        <% if (fieldErrors.title) { %><div class="invalid-feedback"><%= fieldErrors.title[0] %></div><% } %>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small" for="session-date">التاريخ</label>
+        <input type="date" class="form-control <%= fieldErrors.date ? "is-invalid" : "" %>" id="session-date" name="date" required>
+        <% if (fieldErrors.date) { %><div class="invalid-feedback"><%= fieldErrors.date[0] %></div><% } %>
+      </div>
+      <div class="col-md-3">
+        <button type="submit" class="btn btn-primary w-100">إضافة</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>#</th>
+          <th>التاريخ</th>
+          <th>العنوان</th>
+          <th>حضر</th>
+          <th>غاب</th>
+          <th class="text-nowrap">إجراءات</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% if (sessions.length === 0) { %>
+          <tr><td colspan="6" class="text-center text-muted py-4">لا توجد جلسات بعد.</td></tr>
+        <% } %>
+        <% sessions.forEach(function (s, idx) { %>
+          <tr>
+            <td><%= idx + 1 %></td>
+            <td class="text-nowrap"><%= new Date(s.date).toISOString().slice(0, 10) %></td>
+            <td><%= s.title || "—" %></td>
+            <td><%= s.presentCount %></td>
+            <td><%= s.absentCount %></td>
+            <td>
+              <a class="btn btn-sm btn-outline-primary" href="/sessions/<%= s.id %>">تسجيل/عرض الحضور</a>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include("../partials/foot") %>

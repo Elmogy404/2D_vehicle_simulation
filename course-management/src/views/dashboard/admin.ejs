@@ -1,0 +1,84 @@
+<%- include("../partials/head", {}) %>
+
+<h1 class="h4 mb-4">لوحة التحكم — المدير</h1>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-4">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body">
+        <div class="h2 mb-0"><%= stats.counts.courses %></div>
+        <div class="text-muted">دورة</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body">
+        <div class="h2 mb-0"><%= stats.counts.trainees %></div>
+        <div class="text-muted">متدرب</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body">
+        <div class="h2 mb-0"><%= stats.counts.bookings %></div>
+        <div class="text-muted">حجز</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-5">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <h2 class="h5 card-title">الحجوزات حسب الحالة</h2>
+        <% if (stats.byStatus.length === 0) { %>
+          <p class="text-muted mb-0">لا توجد حجوزات بعد.</p>
+        <% } else { %>
+          <table class="table table-sm align-middle mb-0">
+            <thead><tr><th>الحالة</th><th>العدد</th></tr></thead>
+            <tbody>
+              <% stats.byStatus.forEach(function (row) { %>
+                <tr>
+                  <td><span class="badge badge-status-<%= row.status %>"><%= t.bookings.statusLabels[row.status] %></span></td>
+                  <td><%= row.count %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        <% } %>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-7">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <h2 class="h5 card-title">آخر الحجوزات</h2>
+        <% if (stats.recent.length === 0) { %>
+          <p class="text-muted mb-0">لا توجد حجوزات بعد.</p>
+        <% } else { %>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+              <thead><tr><th>الدورة</th><th>المتدرب</th><th>الحالة</th><th>التاريخ</th></tr></thead>
+              <tbody>
+                <% stats.recent.forEach(function (b) { %>
+                  <tr>
+                    <td><%= b.course.title %></td>
+                    <td><%= b.trainee.name %></td>
+                    <td><span class="badge badge-status-<%= b.status %>"><%= t.bookings.statusLabels[b.status] %></span></td>
+                    <td class="text-nowrap"><%= new Date(b.createdAt).toISOString().slice(0, 10) %></td>
+                  </tr>
+                <% }) %>
+              </tbody>
+            </table>
+          </div>
+        <% } %>
+      </div>
+    </div>
+  </div>
+</div>
+
+<%- include("../partials/foot") %>

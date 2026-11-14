@@ -1,0 +1,54 @@
+{
+  "name": "course-management",
+  "version": "1.0.0",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "prisma db seed",
+    "db:generate": "prisma generate",
+    "test": "jest --runInBand"
+  },
+  "license": "MIT",
+  "type": "commonjs",
+  "description": "Course Management web app (Express + Prisma + PostgreSQL, Arabic RTL)",
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "setupFiles": [
+      "<rootDir>/tests/setup.env.js"
+    ],
+    "globalSetup": "<rootDir>/tests/global-setup.js",
+    "globalTeardown": "<rootDir>/tests/global-teardown.js",
+    "testTimeout": 60000,
+    "forceExit": true
+  },
+  "dependencies": {
+    "@prisma/client": "^7.10.1",
+    "bcrypt": "^6.0.0",
+    "connect-flash": "^0.1.1",
+    "connect-pg-simple": "^10.0.0",
+    "csrf-csrf": "^4.0.3",
+    "dotenv": "^18.0.8",
+    "ejs": "^7.0.2",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
+    "express-session": "^1.19.0",
+    "helmet": "^8.3.0",
+    "method-override": "^3.0.0",
+    "pg": "^8.23.1",
+    "prisma": "^7.10.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "jest": "^30.5.2",
+    "supertest": "^7.3.1"
+  },
+  "allowScripts": {
+    "bcrypt@6.0.0": true
+  }
+}

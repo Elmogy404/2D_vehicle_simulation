@@ -1,0 +1,51 @@
+:root {
+  --brand: #16680d;
+  --brand-dark: #0d4d1b;
+  --bg: #f6f8f7;
+}
+
+body {
+  background-color: var(--bg);
+}
+
+.navbar-brand {
+  font-weight: 700;
+}
+
+.navbar {
+  background-color: var(--brand);
+}
+
+.navbar .navbar-nav .nav-link {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.navbar .navbar-nav .nav-link:hover,
+.navbar .navbar-nav .nav-link.active {
+  color: #ffffff;
+}
+
+.card {
+  border-radius: 0.75rem;
+}
+
+main.container {
+  padding-top: 1.5rem;
+  padding-bottom: 3rem;
+  min-height: calc(100vh - 56px - 40px);
+}
+
+footer.site-footer {
+  border-top: 1px solid #e3e8e5;
+  padding: 1rem 0;
+  background-color: #ffffff;
+  color: #6c757d;
+}
+
+.badge-status-PENDING   { background-color: #f2b21c; color: #201a01; }
+.badge-status-CONFIRMED { background-color: #1f8b3b; }
+.badge-status-CANCELLED { background-color: #d33a3a; }
+
+textarea {
+  min-height: 6rem;
+}

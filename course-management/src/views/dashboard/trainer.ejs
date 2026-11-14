@@ -1,0 +1,66 @@
+<%- include("../partials/head", {}) %>
+
+<h1 class="h4 mb-4">لوحة التحكم — المدرب</h1>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body">
+        <div class="h2 mb-0"><%= stats.counts.myCoursesCount %></div>
+        <div class="text-muted">دورة تدرّبها</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body">
+        <div class="h2 mb-0"><%= stats.counts.bookingsCount %></div>
+        <div class="text-muted">حجز في دوراتك</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <h2 class="h5 card-title">دوراتك</h2>
+        <% if (stats.myCourses.length === 0) { %>
+          <p class="text-muted mb-0">لم تُسند إليك دورات بعد؛ تواصل مع المدير.</p>
+        <% } else { %>
+          <ul class="list-group list-group-flush">
+            <% stats.myCourses.forEach(function (c) { %>
+              <li class="list-group-item d-flex justify-content-between align-items-center">
+                <a href="/courses/<%= c.id %>"><%= c.title %></a>
+                <span class="text-muted small"><%= c._count.bookings %> حجز</span>
+              </li>
+            <% }) %>
+          </ul>
+        <% } %>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <h2 class="h5 card-title">الجلسات القادمة</h2>
+        <% if (stats.upcomingSessions.length === 0) { %>
+          <p class="text-muted mb-0">لا توجد جلسات قادمة.</p>
+        <% } else { %>
+          <ul class="list-group list-group-flush">
+            <% stats.upcomingSessions.forEach(function (s) { %>
+              <li class="list-group-item d-flex justify-content-between align-items-center">
+                <span><%= s.course.title %></span>
+                <span class="text-nowrap"><%= new Date(s.date).toISOString().slice(0, 10) %></span>
+              </li>
+            <% }) %>
+          </ul>
+        <% } %>
+      </div>
+    </div>
+  </div>
+</div>
+
+<%- include("../partials/foot") %>

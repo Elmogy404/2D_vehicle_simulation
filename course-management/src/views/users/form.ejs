@@ -1,0 +1,61 @@
+<%- include("../partials/head", {}) %>
+
+<h1 class="h4 mb-4"><%= isEdit ? "تعديل مستخدم" : "إضافة مستخدم" %></h1>
+
+<div class="row justify-content-center">
+  <div class="col-md-6">
+    <div class="card shadow-sm">
+      <div class="card-body p-4">
+        <form method="post" action="<%= formAction %>" novalidate>
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+
+          <div class="mb-3">
+            <label class="form-label" for="user-name">الاسم الكامل</label>
+            <input type="text" class="form-control <%= fieldErrors.name ? "is-invalid" : "" %>" id="user-name" name="name"
+                   value="<%= user.name || "" %>" required minlength="2">
+            <% if (fieldErrors.name) { %><div class="invalid-feedback"><%= fieldErrors.name[0] %></div><% } %>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label" for="user-email">البريد الإلكتروني</label>
+            <input type="email" class="form-control <%= fieldErrors.email ? "is-invalid" : "" %>" id="user-email" name="email"
+                   value="<%= user.email || "" %>" required>
+            <% if (fieldErrors.email) { %><div class="invalid-feedback"><%= fieldErrors.email[0] %></div><% } %>
+          </div>
+
+          <% if (!isEdit) { %>
+            <div class="mb-3">
+              <label class="form-label" for="user-password">كلمة المرور</label>
+              <input type="password" class="form-control <%= fieldErrors.password ? "is-invalid" : "" %>" id="user-password" name="password" required minlength="8">
+              <% if (fieldErrors.password) { %><div class="invalid-feedback"><%= fieldErrors.password[0] %></div><% } %>
+            </div>
+
+            <div class="mb-3">
+              <label class="form-label" for="user-role">الدور</label>
+              <select class="form-select <%= fieldErrors.role ? "is-invalid" : "" %>" id="user-role" name="role" required>
+                <option value="TRAINER" <%= user.role === "TRAINER" ? "selected" : "" %>>مدرب</option>
+                <option value="ADMIN" <%= user.role === "ADMIN" ? "selected" : "" %>>مدير</option>
+              </select>
+              <% if (fieldErrors.role) { %><div class="invalid-feedback"><%= fieldErrors.role[0] %></div><% } %>
+            </div>
+          <% } else { %>
+            <div class="mb-3">
+              <label class="form-label" for="user-password">كلمة مرور جديدة (اختياري)</label>
+              <input type="password" class="form-control <%= fieldErrors.password ? "is-invalid" : "" %>" id="user-password" name="password">
+              <div class="form-text">اتركها فارغة لعدم تغيير كلمة المرور.</div>
+              <% if (fieldErrors.password) { %><div class="invalid-feedback"><%= fieldErrors.password[0] %></div><% } %>
+            </div>
+          <% } %>
+
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary">حفظ</button>
+            <a class="btn btn-outline-secondary" href="/users">إلغاء</a>
+          </div>
+          <% if (isEdit) { %><input type="hidden" name="_method" value="PUT"><% } %>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<%- include("../partials/foot") %>

@@ -1,0 +1,109 @@
+// Course Management - Prisma schema
+// Data model: users (roles), courses, bookings, class sessions, attendance.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  TRAINER
+  TRAINEE
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(TRAINEE)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  coursesAsTrainer     Course[]     @relation("CourseTrainer")
+  bookings             Booking[]
+  sessionsAttended     Attendance[] @relation("Attended")
+  attendanceMarked     Attendance[] @relation("MarkedBy")
+
+  @@index([role])
+  @@map("users")
+}
+
+model Course {
+  id          Int     @id @default(autoincrement())
+  title       String
+  description String
+  price       Decimal @db.Decimal(10, 2)
+  trainerId   Int     @map("trainer_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  trainer  User      @relation("CourseTrainer", fields: [trainerId], references: [id], onDelete: Restrict)
+  bookings Booking[]
+  sessions Session[]
+
+  @@index([trainerId])
+  @@map("courses")
+}
+
+model Booking {
+  id        Int           @id @default(autoincrement())
+  courseId  Int           @map("course_id")
+  traineeId Int           @map("trainee_id")
+  status    BookingStatus @default(PENDING)
+  createdAt DateTime      @default(now()) @map("created_at")
+
+  course  Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  trainee User   @relation(fields: [traineeId], references: [id], onDelete: Cascade)
+
+  @@unique([courseId, traineeId])
+  @@index([courseId, status])
+  @@index([traineeId, status])
+  @@map("bookings")
+}
+
+model Session {
+  id       Int      @id @default(autoincrement())
+  courseId Int      @map("course_id")
+  date      DateTime @db.Date
+  createdAt DateTime @default(now()) @map("created_at")
+
+  course     Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  attendance Attendance[]
+
+  @@index([courseId, date])
+  @@map("sessions")
+}
+
+model Attendance {
+  id         Int              @id @default(autoincrement())
+  sessionId  Int              @map("session_id")
+  traineeId  Int              @map("trainee_id")
+  status     AttendanceStatus
+  markedById Int              @map("marked_by_id")
+  createdAt  DateTime         @default(now()) @map("created_at")
+  updatedAt  DateTime         @updatedAt @map("updated_at")
+
+  session  Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  trainee  User    @relation("Attended", fields: [traineeId], references: [id], onDelete: Cascade)
+  markedBy User    @relation("MarkedBy", fields: [markedById], references: [id], onDelete: Restrict)
+
+  @@unique([sessionId, traineeId])
+  @@index([sessionId])
+  @@index([traineeId])
+  @@map("attendance")
+}

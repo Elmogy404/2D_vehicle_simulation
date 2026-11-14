@@ -1,0 +1,41 @@
+<%- include("../partials/head", {}) %>
+
+<h1 class="h4 mb-4">تقرير حضوري</h1>
+
+<% if (courses.length === 0) { %>
+  <div class="alert alert-info">لا توجد سجلات حضور بعد؛ حضورُك يظهر بعد تسجيل المدرب لجلسات دوراتك المؤكدة الحجز.</div>
+<% } %>
+
+<% courses.forEach(function (entry) { %>
+  <div class="card shadow-sm mb-3">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+        <div>
+          <h2 class="h5 mb-1"><%= entry.course.title %></h2>
+          <div class="text-muted small">المدرب: <%= entry.course.trainer %></div>
+        </div>
+        <div>
+          <span class="badge text-bg-success">حاضر: <%= entry.present %></span>
+          <span class="badge text-bg-danger">غائب: <%= entry.absent %></span>
+        </div>
+      </div>
+      <table class="table table-sm align-middle mt-3 mb-0">
+        <thead><tr><th>الجلسة</th><th>الحالة</th></tr></thead>
+        <tbody>
+          <% entry.sessions.forEach(function (row) { %>
+            <tr>
+              <td><%= new Date(row.date).toISOString().slice(0, 10) %></td>
+              <td>
+                <span class="badge <%= row.status === "PRESENT" ? "text-bg-success" : "text-bg-danger" %>">
+                  <%= row.status === "PRESENT" ? "حاضر" : "غائب" %>
+                </span>
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<% }) %>
+
+<%- include("../partials/foot") %>

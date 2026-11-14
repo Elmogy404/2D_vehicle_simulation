@@ -1,0 +1,84 @@
+<%- include("../partials/head", {}) %>
+
+<h1 class="h4 mb-4">إدارة الحجوزات</h1>
+
+<div class="card shadow-sm mb-3">
+  <div class="card-body">
+    <form class="row g-2 align-items-end" method="get" action="/bookings">
+      <div class="col-md-5">
+        <label class="form-label small" for="f-course">الدورة</label>
+        <select class="form-select form-select-sm" id="f-course" name="courseId">
+          <option value="">الكل</option>
+          <% courses.forEach(function (c) { %>
+            <option value="<%= c.id %>" <%= String(filters.courseId) === String(c.id) ? "selected" : "" %>><%= c.title %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small" for="f-status">الحالة</label>
+        <select class="form-select form-select-sm" id="f-status" name="status">
+          <option value="">الكل</option>
+          <% ["PENDING", "CONFIRMED", "CANCELLED"].forEach(function (s) { %>
+            <option value="<%= s %>" <%= filters.status === s ? "selected" : "" %>><%= t.bookings.statusLabels[s] %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <button class="btn btn-sm btn-primary w-100" type="submit">تصفية</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>#</th>
+          <th>الدورة</th>
+          <th>المتدرب</th>
+          <th>الحالة</th>
+          <th>تاريخ الحجز</th>
+          <th class="text-nowrap">إجراءات</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% if (bookings.length === 0) { %>
+          <tr><td colspan="6" class="text-center text-muted py-4">لا توجد حجوزات.</td></tr>
+        <% } %>
+        <% bookings.forEach(function (b, idx) { %>
+          <tr>
+            <td><%= (pageCtx.page - 1) * 8 + idx + 1 %></td>
+            <td><%= b.course.title %></td>
+            <td><%= b.trainee.name %> <span class="text-muted small">(<%= b.trainee.email %>)</span></td>
+            <td><span class="badge badge-status-<%= b.status %>"><%= t.bookings.statusLabels[b.status] %></span></td>
+            <td class="text-nowrap"><%= new Date(b.createdAt).toISOString().slice(0, 10) %></td>
+            <td class="text-nowrap">
+              <% if (b.status === "PENDING") { %>
+                <form class="d-inline" method="post" action="/bookings/<%= b.id %>/confirm">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+                  <input type="hidden" name="_method" value="PUT">
+                  <button type="submit" class="btn btn-sm btn-outline-success">تأكيد</button>
+                </form>
+              <% } %>
+              <% if (b.status !== "CANCELLED") { %>
+                <form class="d-inline" method="post" action="/bookings/<%= b.id %>/cancel" onsubmit="return confirm('هل تريد إلغاء هذا الحجز؟')">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+                  <input type="hidden" name="_method" value="PUT">
+                  <button type="submit" class="btn btn-sm btn-outline-danger">إلغاء</button>
+                </form>
+              <% } else { %>
+                <span class="text-muted small">—</span>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include("../partials/pagination", {}) %>
+
+<%- include("../partials/foot") %>

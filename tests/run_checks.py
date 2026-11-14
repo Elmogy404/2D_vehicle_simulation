@@ -18,7 +18,7 @@ SCRIPTS = ["segment_navigation_test", "road_piece_catalog_test", "segment_road_g
            "segment_road_boundary_test", "road_generation_router_test", "main_segmented_generation_test",
            "authored_signal_test", "npc_clearance_test", "spatial_index_test", "optimization_smoke_test",
            "ai_gameplay_parity_test", "ai_headless_parity_test", "ai_route_planner_test", "ai_speed_reward_test",
-           "ai_training_ui_test", "map_regeneration_shortcut_test"]
+           "ai_training_ui_test", "map_regeneration_shortcut_test", "collision_system_test"]
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)

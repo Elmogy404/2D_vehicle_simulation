@@ -14,6 +14,7 @@ extends CanvasLayer
 var ego: Node
 
 var speed_text: Label
+var collision_text: Label
 
 
 func _ready() -> void:
@@ -58,11 +59,48 @@ func _on_ego_crashed(crash_speed: float) -> void:
 		crash_speed * ego.kmh_per_unit
 	)
 
+	_update_collision_text()
+
 	visible = true
 
 	# Freeze the gameplay. This node keeps running so the
 	# Restart button and the R key still work.
 	get_tree().paused = true
+
+
+func _update_collision_text() -> void:
+	if collision_text == null:
+		return
+	var summary: Dictionary = {}
+	if ego.has_method("get_collision_summary"):
+		summary = ego.call("get_collision_summary")
+	var event: Dictionary = summary.get("terminal_collision", {})
+	if event.is_empty():
+		collision_text.visible = false
+		return
+
+	var partner_type := String(event.get("partner_type", "unknown"))
+	var label := "Unclassified object"
+	match partner_type:
+		"world":
+			label = "World / barrier"
+		"vehicle":
+			label = "Vehicle"
+		"pedestrian":
+			label = "Pedestrian"
+		"obstacle":
+			label = "Obstacle"
+
+	collision_text.text = "%s collision · %d km/h impact" % [
+		label,
+		roundi(float(event.get("impact_speed_kmh", 0.0)))
+	]
+	collision_text.add_theme_color_override(
+		"font_color",
+		Color(0.96, 0.38, 0.32) if bool(event.get("safety_critical", false))
+		else Color(0.95, 0.72, 0.25)
+	)
+	collision_text.visible = true
 
 
 # ============================================================
@@ -160,6 +198,22 @@ func _build_interface() -> void:
 	speed_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	box.add_child(speed_text)
+
+
+	collision_text = Label.new()
+
+	collision_text.name = "CollisionType"
+	collision_text.text = ""
+	collision_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	collision_text.add_theme_font_size_override("font_size", 17)
+	collision_text.add_theme_color_override(
+		"font_color",
+		Color(0.95, 0.72, 0.25)
+	)
+	collision_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	collision_text.visible = false
+
+	box.add_child(collision_text)
 
 
 	var button := Button.new()

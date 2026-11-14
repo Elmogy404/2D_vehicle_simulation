@@ -33,6 +33,16 @@ const GOAL_RADIUS := 85.0
 const OBSERVATION_SIZE := 31
 static var DEFAULT_REWARD_CONFIG: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("res://ai/training_defaults.json"))["reward_config"]
 
+
+@export_category("Collision")
+## Legacy is the default so existing training runs keep their exact episode
+## termination semantics. Enable this to test severity-aware termination.
+@export var severity_aware_termination: bool = false
+@export var minor_contact_speed: float = 30.0
+@export var terminal_impact_speed: float = 120.0
+@export var pedestrian_terminal_impact_speed: float = 0.0
+@export var collision_event_cooldown: float = 0.25
+
 var road_generator: Node
 var ego: CharacterBody2D
 var tcp_peer := StreamPeerTCP.new()
@@ -124,6 +134,7 @@ func _setup_training_world() -> void:
 	ego = EGO_SCENE.instantiate() as CharacterBody2D
 	add_child(ego)
 	ego.set_physics_process(false)
+	_apply_collision_config()
 	base_max_speed = float(ego.get("max_speed"))
 	if not visible_mode:
 		ego.get_node("Camera2D").set_process(false)
@@ -131,6 +142,36 @@ func _setup_training_world() -> void:
 	sensor_rig.set("show_rays", false)
 	sensor_rig.set_physics_process(false)
 	ego.use_default_controller()
+
+
+func _apply_collision_config() -> void:
+	if ego == null:
+		return
+	ego.set(
+		"collision_termination_mode",
+		1 if severity_aware_termination else 0
+	)
+	ego.set("minor_contact_speed", minor_contact_speed)
+	ego.set("terminal_impact_speed", terminal_impact_speed)
+	ego.set("pedestrian_terminal_impact_speed", pedestrian_terminal_impact_speed)
+	ego.set("collision_event_cooldown", collision_event_cooldown)
+
+
+func _collision_info() -> Dictionary:
+	if ego == null or not ego.has_method("get_collision_summary"):
+		return {
+			"collision_count": 0,
+			"events_dropped": 0,
+			"last_collision": {},
+			"terminal_collision": {},
+			"termination_mode": "unavailable",
+			"thresholds": {},
+		}
+	return ego.call("get_collision_summary")
+
+
+func _collision_termination_requested() -> bool:
+	return ego != null and bool(ego.get("has_crashed"))
 
 
 func _setup_monitor_hud() -> void:
@@ -449,7 +490,8 @@ func _step_episode(action_value: Variant) -> void:
 	var success := false
 	var off_road := absf(float(state["lateral_offset"])) \
 		> float(state["half_width"]) - float(ego.get("vehicle_width")) * 0.5
-	if bool(ego.get("has_crashed")):
+	var collision_info := _collision_info()
+	if _collision_termination_requested():
 		reward -= float(reward_config["crash_penalty"])
 		terminated = true
 	elif off_road:
@@ -482,7 +524,10 @@ func _step_episode(action_value: Variant) -> void:
 		"truncated": truncated,
 		"info": {
 			"success": success,
-			"crashed": bool(ego.get("has_crashed")),
+			"crashed": _collision_termination_requested(),
+			"collision": collision_info,
+			"collision_count": int(collision_info.get("collision_count", 0)),
+			"terminal_collision": collision_info.get("terminal_collision", {}),
 			"off_road": off_road,
 			"progress": current_progress,
 			"goal_progress": goal_progress,
@@ -513,7 +558,7 @@ func _edge_pressure(lateral_offset: float, target_offset: float, safe_half_width
 func _max_speed_bonus(progress_delta: float, off_road: bool) -> float:
 	# A small per-step bonus for forward driving at (or very near) the speed
 	# limiter. Do not pay it for crashes, leaving the road, or stationary spins.
-	if ego == null or off_road or bool(ego.get("has_crashed")) or progress_delta <= 0.0:
+	if ego == null or off_road or _collision_termination_requested() or progress_delta <= 0.0:
 		return 0.0
 	var speed_limit := float(ego.get("max_speed"))
 	if speed_limit <= 0.0 or float(ego.get("current_speed")) < speed_limit * 0.98:
