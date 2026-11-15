@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 
 from godot_gym_env import ENVIRONMENT_VERSION, GodotRoadEnv
+from interface_schema import metadata as interface_metadata
 from training_control import TrainingControl, parse_reward_config
 from training_config import TRAINING_DEFAULTS, prepare_manifest, runtime_provenance
 from policy_checkpoint import load_policy as load_sb3_checkpoint
@@ -177,6 +178,7 @@ def main() -> None:
     manifest_path = model_dir / f"{arguments.run_name}_training_config.json"
     manifest = {
         "environment_version": ENVIRONMENT_VERSION,
+        "interface_schema": interface_metadata(),
         "generator_type": arguments.generator_type,
         "workers": arguments.n_envs,
         "evaluation": {"seed": arguments.eval_seed, "episodes": arguments.eval_episodes, "threshold": arguments.success_threshold},

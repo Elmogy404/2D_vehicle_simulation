@@ -9,6 +9,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ai"))
 
 from godot_bridge import GodotBridge
+from interface_schema import metadata as interface_metadata
+
+
+SCHEMA_FIELDS = interface_metadata()
 
 
 def main() -> None:
@@ -26,6 +30,7 @@ def main() -> None:
                         "type": "reset",
                         "seed": seed,
                         "options": {"curriculum": False, "curriculum_stage": stage},
+                        **SCHEMA_FIELDS,
                     }
                 )
                 if not response["info"].get("spawn_clear", False):

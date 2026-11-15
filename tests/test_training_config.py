@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ai"))
+from interface_schema import metadata as interface_metadata
 from training_config import TRAINING_DEFAULTS, REWARD_DEFAULTS, prepare_manifest
 from policy_checkpoint import checkpoint_generator, manifest_for_model
 from training_control import DEFAULT_REWARD_CONFIG
@@ -37,6 +38,22 @@ class ConfigTests(unittest.TestCase):
                 prepare_manifest(path, dict(manifest, workers=4), resume=True)
             with self.assertRaisesRegex(ValueError, "source changed"):
                 prepare_manifest(path, dict(manifest, runtime={"source_hash": "def"}), resume=True)
+
+    def test_resume_checks_interface_schema_but_allows_legacy_manifests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run_training_config.json"
+            manifest = {"generator_type": "original", "interface_schema": interface_metadata()}
+            prepare_manifest(path, manifest, resume=False)
+            incompatible = {
+                "generator_type": "original",
+                "interface_schema": dict(interface_metadata(), schema_version=2),
+            }
+            with self.assertRaisesRegex(ValueError, "interface schema"):
+                prepare_manifest(path, incompatible, resume=True)
+
+            path.unlink()
+            path.write_text("{}", encoding="utf-8")
+            prepare_manifest(path, manifest, resume=True)
 
     def test_best_and_partial_checkpoints_reserve_a_run_name(self):
         for suffix in ("_best.zip", "checkpoints/run_1024_steps.zip"):

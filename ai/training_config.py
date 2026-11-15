@@ -17,6 +17,7 @@ REWARD_DEFAULTS = SPEC["reward_config"]
 def runtime_provenance() -> dict:
     digest = hashlib.sha256()
     names = ["ai/rl_training_world.gd", "ai/godot_gym_env.py", "ai/godot_bridge.py", "ai/training_defaults.json",
+             "ai/interface_schema.json", "ai/interface_schema.py", "scripts/ai_interface_schema.gd",
              "scenes/EgoVehicle.tscn", "scenes/RoadGenerator.tscn", "project.godot"]
     names += [str(path.relative_to(ROOT)).replace("\\", "/") for path in sorted((ROOT / "scenes/road_pieces").glob("*.tscn"))]
     names += ["scripts/" + name + ".gd" for name in ("driving_task", "driving_route", "vehicle_clearance",
@@ -44,6 +45,9 @@ def prepare_manifest(path: Path, manifest: dict, *, resume: bool) -> None:
                     "learning_rate", "batch_size", "gamma", "entropy_coefficient"):
             if previous.get(key) != manifest.get(key):
                 raise ValueError(f"Resume settings differ for {key}; keep the original values or start a new run.")
+        if previous.get("interface_schema") is not None \
+                and previous.get("interface_schema") != manifest.get("interface_schema"):
+            raise ValueError("Resume interface schema differs; keep the original observation/action contract or start a new run.")
         if previous.get("runtime", {}).get("source_hash") not in (None, manifest.get("runtime", {}).get("source_hash")):
             raise ValueError("Simulation source changed since this run. Start a new experiment instead of mixing environments.")
         return

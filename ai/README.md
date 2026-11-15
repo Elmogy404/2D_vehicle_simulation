@@ -100,6 +100,11 @@ planned-road points in ego coordinates; road half-width at those points; and
 five reserved traffic-light slots. Setup 2 still has no cars, pedestrians, or
 signals, so the reserved slots indicate “no signal.” PPO controls steering and
 signed acceleration/braking; the training adapter prevents unintended reverse.
+`interface_schema.json` is the authoritative field-order, size, dtype, bound,
+and reserved-value contract shared by Python and Godot. Schema version 1 is
+checked during reset/step and live-policy requests; “no signal” is currently
+validated as `[0, 0, 0, 0, 1]`. Finite out-of-range actions follow the existing
+documented clipping policy, while malformed or non-finite values are rejected.
 The shared ego car now tops out at 150 km/h (500 world units/s), and training
 can award a small per-step bonus at 98% of that speed or higher while making
 forward progress on the road. **Top-speed reward** defaults to zero so turning

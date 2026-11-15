@@ -3,6 +3,7 @@ extends Node2D
 const ROAD_SCENE := preload("res://scenes/RoadGenerator.tscn")
 const EGO_SCENE := preload("res://scenes/EgoVehicle.tscn")
 const DRIVING_TASK = preload("res://scripts/driving_task.gd")
+const INTERFACE_SCHEMA = preload("res://scripts/ai_interface_schema.gd")
 var driving_task := DRIVING_TASK.new()
 const SEGMENTED_GENERATOR = preload("res://scripts/segment_road_generator.gd")
 var generator_type := "original"
@@ -30,7 +31,6 @@ const SEGMENTED_GOAL_STAGES := [
 const CURRICULUM_WINDOW := 20
 const CURRICULUM_ADVANCE_RATE := 0.8
 const GOAL_RADIUS := 85.0
-const OBSERVATION_SIZE := 31
 static var DEFAULT_REWARD_CONFIG: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("res://ai/training_defaults.json"))["reward_config"]
 
 
@@ -65,6 +65,7 @@ var furthest_progress := 0.0
 var idle_steps := 0
 var idle_anchor := 0.0
 var current_action := Vector2.ZERO
+var last_action_clipped := false
 var episode_rng := RandomNumberGenerator.new()
 var curriculum_stage := 0
 var active_episode_stage := 0
@@ -224,6 +225,11 @@ func _handle_request(line: String) -> void:
 	var message: Dictionary = parsed
 	match String(message.get("type", "")):
 		"reset":
+			var schema_error := _client_schema_error(message)
+			if not schema_error.is_empty():
+				_send_message({"error": schema_error})
+				request_busy = false
+				return
 			var options_value: Variant = message.get("options", {})
 			var reset_options: Dictionary = options_value if options_value is Dictionary else {}
 			var selected_generator := String(reset_options.get("generator_type", "original"))
@@ -251,9 +257,17 @@ func _handle_request(line: String) -> void:
 				_send_message({"error": reset_error, "recoverable_reset": true})
 				request_busy = false
 				return
+			var observation := _get_observation()
+			var observation_error := _observation_schema_error(observation)
+			if not observation_error.is_empty():
+				_send_message({"error": observation_error})
+				request_busy = false
+				return
 			_send_message({
-				"observation": _get_observation(),
+				"schema_version": INTERFACE_SCHEMA.schema_version(),
+				"observation": observation,
 				"info": {
+					"interface_schema": INTERFACE_SCHEMA.metadata(),
 					"seed": int(road_generator.get("seed_value")),
 					"requested_seed": int(message.get("seed", 1)),
 					"map_attempts": episode_map_attempts,
@@ -269,6 +283,11 @@ func _handle_request(line: String) -> void:
 				}
 			})
 		"step":
+			var schema_error := _client_schema_error(message)
+			if not schema_error.is_empty():
+				_send_message({"error": schema_error})
+				request_busy = false
+				return
 			await _step_episode(message.get("action", []))
 		"training_state":
 			_send_message(_training_state())
@@ -393,6 +412,7 @@ func _reset_episode(
 	ego.global_position = route.get_position_at(start_progress, _lane_center_offset_at(start_progress))
 	ego.global_rotation = route.get_rotation_at(start_progress)
 	ego.set_control(0.0, 0.0, 0.0)
+	last_action_clipped = false
 	var sensors: Node = ego.get_node("SensorRig")
 	sensors.call("update_sensors")
 	episode_active = true
@@ -445,13 +465,17 @@ func _step_episode(action_value: Variant) -> void:
 	if not episode_active:
 		_send_message({"error": "reset must be called before step"})
 		return
-	if not action_value is Array or action_value.size() != 2:
-		_send_message({"error": "action must be [steering, signed_acceleration]"})
+	var action_result := INTERFACE_SCHEMA.validate_action(action_value, true)
+	if not bool(action_result.get("valid", false)):
+		_send_message({
+			"error": "action schema error (schema v%d): %s" % [
+				INTERFACE_SCHEMA.schema_version(),
+				_join_errors(action_result.get("errors", []))
+			]
+		})
 		return
-	current_action = Vector2(
-		clampf(float(action_value[0]), -1.0, 1.0),
-		clampf(float(action_value[1]), -1.0, 1.0)
-	)
+	current_action = action_result["value"]
+	last_action_clipped = bool(action_result.get("clipped", false))
 	remaining_physics_ticks = ACTION_REPEAT
 	step_in_progress = true
 	await action_completed
@@ -518,12 +542,19 @@ func _step_episode(action_value: Variant) -> void:
 		current_action = Vector2.ZERO
 		ego.set_control(0.0, 0.0, 0.0)
 	var observation := _get_observation()
+	var observation_error := _observation_schema_error(observation)
+	if not observation_error.is_empty():
+		_send_message({"error": observation_error})
+		return
 	_send_message({
+		"schema_version": INTERFACE_SCHEMA.schema_version(),
 		"observation": observation,
 		"reward": reward,
 		"terminated": terminated,
 		"truncated": truncated,
 		"info": {
+			"interface_schema": INTERFACE_SCHEMA.metadata(),
+			"action_clipped": last_action_clipped,
 			"success": success,
 			"crashed": collision_detected,
 			"collision": collision_info,
@@ -679,6 +710,33 @@ func _get_observation() -> Array[float]:
 	driving_task.goal_progress = goal_progress
 	driving_task.base_max_speed = base_max_speed
 	return driving_task._get_observation()
+
+
+func _client_schema_error(message: Dictionary) -> String:
+	return INTERFACE_SCHEMA.compatibility_error(
+		int(message.get("schema_version", -1)),
+		int(message.get("observation_size", -1)),
+		int(message.get("action_size", -1)),
+		"Python client",
+		String(message.get("observation_dtype", "")),
+		String(message.get("action_dtype", ""))
+	)
+
+
+func _observation_schema_error(observation: Array) -> String:
+	var errors := INTERFACE_SCHEMA.validate_observation(observation)
+	if errors.is_empty():
+		return ""
+	return "observation schema error (schema v%d): %s" % [
+		INTERFACE_SCHEMA.schema_version(), _join_errors(errors)
+	]
+
+
+func _join_errors(errors: Array) -> String:
+	var parts := PackedStringArray()
+	for error in errors:
+		parts.append(String(error))
+	return "; ".join(parts)
 
 
 func _send_message(message: Dictionary) -> void:

@@ -1,6 +1,7 @@
 extends Node2D
 
 const DRIVING_TASK = preload("res://scripts/driving_task.gd")
+const INTERFACE_SCHEMA = preload("res://scripts/ai_interface_schema.gd")
 const SPATIAL_INDEX = preload("res://scripts/simulation_spatial_index.gd")
 var live_driving_task := DRIVING_TASK.new()
 
@@ -10,7 +11,6 @@ const POLICY_ACTION_REPEAT := 4
 const MIN_GOAL_DISTANCE := 250.0
 const DEFAULT_GOAL_DISTANCE := 4200.0
 const GOAL_RADIUS := 85.0
-const OBSERVATION_SIZE := 31
 const DEFAULT_AI_CHECKPOINT := 1
 const ORIGINAL_GENERATOR_TRAFFIC_COUNT := 8
 const SEGMENTED_GENERATOR_TRAFFIC_COUNT := 20
@@ -559,17 +559,38 @@ func _extract_policy_responses() -> void:
 				var response: Dictionary = parsed
 				var response_id := int(response.get("request_id", -1))
 				if response_id == ai_request_id:
-					var action: Variant = response.get("action", [])
-					if action is Array and action.size() == 2:
-						ai_action = Vector2(
-							clampf(float(action[0]), -1.0, 1.0),
-							clampf(float(action[1]), -1.0, 1.0)
-						)
-						ai_request_in_flight = false
-					elif response.has("error"):
+					if response.has("error"):
 						ai_request_in_flight = false
 						ai_status = "Policy error: %s" % String(response["error"])
+					else:
+						var schema_error := INTERFACE_SCHEMA.validate_remote_metadata(
+							response.get("interface_schema"), "Python policy response"
+						)
+						if not schema_error.is_empty():
+							ai_request_in_flight = false
+							ai_failed = true
+							ai_status = "Policy schema error: %s" % schema_error
+						else:
+							var action_result := INTERFACE_SCHEMA.validate_action(
+								response.get("action"), true
+							)
+							if not bool(action_result.get("valid", false)):
+								ai_request_in_flight = false
+								ai_failed = true
+								ai_status = "Policy action schema error: %s" % _schema_errors_text(
+									action_result.get("errors", [])
+								)
+							else:
+								ai_action = action_result["value"]
+								ai_request_in_flight = false
 		newline_index = ai_peer_buffer.find(10)
+
+
+func _schema_errors_text(errors: Array) -> String:
+	var parts := PackedStringArray()
+	for error in errors:
+		parts.append(String(error))
+	return "; ".join(parts)
 
 
 func _send_policy_observation() -> void:
@@ -577,15 +598,21 @@ func _send_policy_observation() -> void:
 	or ai_peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 		return
 	var observation := _get_ai_observation()
-	if observation.size() != OBSERVATION_SIZE:
+	var observation_errors := INTERFACE_SCHEMA.validate_observation(observation)
+	if not observation_errors.is_empty():
 		ai_failed = true
-		ai_status = "AI observation size mismatch; press I to return."
+		ai_status = "AI observation schema error: %s" % _schema_errors_text(observation_errors)
 		return
 	ai_request_id += 1
 	var message := {
 		"type": "predict",
 		"request_id": ai_request_id,
-		"observation": observation
+		"observation": observation,
+		"schema_version": INTERFACE_SCHEMA.schema_version(),
+		"observation_size": INTERFACE_SCHEMA.observation_size(),
+		"action_size": INTERFACE_SCHEMA.action_size(),
+		"observation_dtype": INTERFACE_SCHEMA.observation_dtype(),
+		"action_dtype": INTERFACE_SCHEMA.action_dtype(),
 	}
 	var write_error := ai_peer.put_data((JSON.stringify(message) + "\n").to_utf8_buffer())
 	if write_error == OK:

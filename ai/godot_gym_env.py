@@ -9,17 +9,33 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from godot_bridge import GodotBridge, ResetUnavailableError
+from interface_schema import (
+    ACTION_SIZE,
+    OBSERVATION_SIZE,
+    SCHEMA_VERSION,
+    action_space_high,
+    action_space_low,
+    metadata as interface_metadata,
+    observation_space_high,
+    observation_space_low,
+    validate_action,
+    validate_observation,
+    validate_remote_metadata,
+)
 
 
-OBSERVATION_SIZE = 31
-ACTION_SIZE = 2
 ENVIRONMENT_VERSION = 3
 
 
 class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
     """Empty-road route-following environment backed by a Godot subprocess."""
 
-    metadata = {"render_modes": []}
+    metadata = {
+        "render_modes": [],
+        "interface_schema_version": SCHEMA_VERSION,
+        "observation_size": OBSERVATION_SIZE,
+        "action_size": ACTION_SIZE,
+    }
 
     def __init__(
         self,
@@ -36,13 +52,13 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
             raise ValueError("generator_type must be original or segmented")
         self.generator_type = generator_type
         self.action_space = spaces.Box(
-            low=np.full(ACTION_SIZE, -1.0, dtype=np.float32),
-            high=np.full(ACTION_SIZE, 1.0, dtype=np.float32),
+            low=action_space_low(),
+            high=action_space_high(),
             dtype=np.float32,
         )
         self.observation_space = spaces.Box(
-            low=np.full(OBSERVATION_SIZE, -1.0, dtype=np.float32),
-            high=np.full(OBSERVATION_SIZE, 1.0, dtype=np.float32),
+            low=observation_space_low(),
+            high=observation_space_high(),
             dtype=np.float32,
         )
         self.bridge = GodotBridge(godot_executable, visible=visible,
@@ -73,20 +89,26 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
         # Evaluation uses an exact seed and must expose an invalid map rather
         # than silently replace it. Unseeded training can recover deterministically.
         attempts = 1 if seed is not None and not restoring else 8
+        schema_info = interface_metadata()
         for attempt in range(attempts):
             actual_seed = (episode_seed + attempt * 1_000_003) % (2**31 - 1)
             try:
                 response = self.bridge.request(
-                    {"type": "reset", "seed": actual_seed, "options": reset_options}
+                    {
+                        "type": "reset",
+                        "seed": actual_seed,
+                        "options": reset_options,
+                        **schema_info,
+                    }
                 )
                 break
             except ResetUnavailableError:
                 if attempt == attempts - 1:
                     raise
         self._pending_training_state = None
-        observation = np.asarray(response["observation"], dtype=np.float32)
-        self._validate_observation(observation)
         info = dict(response.get("info", {}))
+        validate_remote_metadata(info.get("interface_schema"), source="Godot reset response")
+        observation = validate_observation(response["observation"])
         info.update(requested_seed=episode_seed, reset_retries=attempt)
         info["godot_pid"] = self.bridge.process_id
         return observation, info
@@ -106,29 +128,28 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
         self,
         action: np.ndarray,
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
-        clipped_action = np.asarray(action, dtype=np.float32).reshape(ACTION_SIZE)
-        clipped_action = np.clip(clipped_action, -1.0, 1.0)
+        clipped_action, action_clipped = validate_action(action, clip=True)
+        schema_info = interface_metadata()
         response = self.bridge.request(
-            {"type": "step", "action": clipped_action.tolist()}
+            {
+                "type": "step",
+                "action": clipped_action.tolist(),
+                **schema_info,
+            }
         )
-        observation = np.asarray(response["observation"], dtype=np.float32)
-        self._validate_observation(observation)
+        info = dict(response.get("info", {}))
+        validate_remote_metadata(info.get("interface_schema"), source="Godot step response")
+        observation = validate_observation(response["observation"])
+        info["action_clipped"] = action_clipped or bool(info.get("action_clipped", False))
+        info["godot_pid"] = self.bridge.process_id
         return (
             observation,
             float(response["reward"]),
             bool(response["terminated"]),
             bool(response["truncated"]),
-            dict(response.get("info", {}), godot_pid=self.bridge.process_id),
+            info,
         )
 
     def close(self) -> None:
         if hasattr(self, "bridge"):
             self.bridge.close()
-
-    def _validate_observation(self, observation: np.ndarray) -> None:
-        if observation.shape != (OBSERVATION_SIZE,):
-            raise RuntimeError(
-                f"Expected {OBSERVATION_SIZE} observation values, got {observation.shape}"
-            )
-        if not np.isfinite(observation).all():
-            raise RuntimeError("Godot returned a non-finite observation")

@@ -2,6 +2,7 @@ extends RefCounted
 ## The driving task contract shared by the live viewer and training worlds.
 const DRIVING_ROUTE = preload("res://scripts/driving_route.gd")
 const CLEARANCE = preload("res://scripts/vehicle_clearance.gd")
+const INTERFACE_SCHEMA = preload("res://scripts/ai_interface_schema.gd")
 const ROUTE_ENDPOINT_CLEARANCE := 80.0
 const SPAWN_ROUTE_ATTEMPTS := 48
 const SPAWN_SAMPLE_SPACING := 40.0
@@ -11,7 +12,6 @@ const PROGRESS_WINDOW := 100.0
 const GOAL_RADIUS := 85.0
 const MAX_GOAL_DISTANCE := 6000.0
 const ROAD_PREVIEW_DISTANCES := [60.0, 120.0, 240.0, 400.0]
-const OBSERVATION_SIZE := 31
 # Border tolerance for footprint membership. 0.5 world units is well below the
 # 62-unit vehicle width and covers polyline curvature error (a radius-131 curve
 # sampled at the network's spacing deviates by less than 0.25 units).
@@ -248,7 +248,7 @@ func _lane_center_offset_for_route(candidate_route: RoutePath, progress: float) 
 func _get_observation() -> Array[float]:
 	var result: Array[float] = []
 	if route == null or not route.is_valid():
-		result.resize(OBSERVATION_SIZE)
+		result.resize(INTERFACE_SCHEMA.observation_size())
 		result.fill(0.0)
 		return result
 	var state := _get_route_state()

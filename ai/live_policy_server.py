@@ -8,12 +8,13 @@ import logging
 from pathlib import Path
 import socket
 
-import numpy as np
-
-
-OBSERVATION_SIZE = 31
-
-
+from interface_schema import (
+    SCHEMA_VERSION,
+    metadata as interface_metadata,
+    validate_action,
+    validate_observation,
+    validate_remote_metadata,
+)
 from policy_checkpoint import load_policy
 
 
@@ -41,7 +42,9 @@ def main() -> int:
         if not arguments.model.is_file():
             raise FileNotFoundError(f"PPO checkpoint does not exist: {arguments.model}")
         model = load_policy(arguments.model)
-        logger.info("Loaded PPO checkpoint %s", arguments.model)
+        logger.info(
+            "Loaded PPO checkpoint %s (interface schema v%d)", arguments.model, SCHEMA_VERSION
+        )
     except Exception:
         logger.exception("Could not load the live PPO checkpoint")
         return 2
@@ -65,18 +68,16 @@ def main() -> int:
                         break
 
                     request_id = int(request.get("request_id", -1))
-                    observation = np.asarray(request.get("observation", []), dtype=np.float32)
-                    if observation.shape != (OBSERVATION_SIZE,):
-                        raise ValueError(
-                            f"expected {OBSERVATION_SIZE} observation values, "
-                            f"got shape {observation.shape}"
-                        )
-                    if not np.isfinite(observation).all():
-                        raise ValueError("observation contains a non-finite value")
+                    validate_remote_metadata(request, source="Godot live request")
+                    observation = validate_observation(request.get("observation"))
                     action, _state = model.predict(observation, deterministic=True)
+                    validated_action, action_clipped = validate_action(action, clip=True)
                     response = {
                         "request_id": request_id,
-                        "action": np.asarray(action, dtype=np.float32).reshape(2).tolist(),
+                        "schema_version": SCHEMA_VERSION,
+                        "interface_schema": interface_metadata(),
+                        "action": validated_action.tolist(),
+                        "action_clipped": action_clipped,
                     }
                 except Exception as error:
                     logger.exception("Live policy request failed")

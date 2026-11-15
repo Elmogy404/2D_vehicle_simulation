@@ -19,7 +19,7 @@ SCRIPTS = ["segment_navigation_test", "road_piece_catalog_test", "segment_road_g
            "authored_signal_test", "npc_clearance_test", "spatial_index_test", "optimization_smoke_test",
            "ai_gameplay_parity_test", "ai_headless_parity_test", "ai_route_planner_test", "ai_speed_reward_test",
            "ai_training_ui_test", "map_regeneration_shortcut_test", "collision_system_test",
-           "drivable_area_test"]
+           "drivable_area_test", "schema_validation_test"]
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -31,7 +31,10 @@ def main() -> None:
     godot = find_godot(args.godot)
     runs = ROOT / "ai/runs"
     runs.mkdir(exist_ok=True)
-    tasks = [("python", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"])]
+    tasks = [
+        ("python", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]),
+        ("interface_schema_integration", [sys.executable, "tests/interface_schema_integration.py", "--godot", godot]),
+    ]
     for name in SCRIPTS + (["ai_environment_test"] if args.full else []) + (["ai_training_lifecycle_integration"] if args.lifecycle else []):
         tasks.append((name, [godot, "--headless", "--fixed-fps", "60", "--path", str(ROOT),
                             "--log-file", str(runs / (name + ".log")), "--script", "res://tests/" + name + ".gd"]))

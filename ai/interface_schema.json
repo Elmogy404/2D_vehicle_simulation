@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "observation": {
+    "size": 31,
+    "dtype": "float32",
+    "gym_min": -1.0,
+    "gym_max": 1.0,
+    "fields": [
+      {
+        "name": "ray_distances",
+        "index": 0,
+        "size": 9,
+        "min": 0.0,
+        "max": 1.0,
+        "normalized": true,
+        "description": "Nine normalized sensor ray distances, nearest first."
+      },
+      {
+        "name": "ego_speed",
+        "index": 9,
+        "size": 1,
+        "min": -1.0,
+        "max": 1.0,
+        "normalized": true,
+        "description": "Current speed divided by the vehicle maximum speed."
+      },
+      {
+        "name": "steering_state",
+        "index": 10,
+        "size": 1,
+        "min": -1.0,
+        "max": 1.0,
+        "normalized": true,
+        "description": "Current steering input."
+      },
+      {
+        "name": "heading_error",
+        "index": 11,
+        "size": 1,
+        "min": -1.0,
+        "max": 1.0,
+        "normalized": true,
+        "description": "Route heading error divided by pi."
+      },
+      {
+        "name": "lane_error",
+        "index": 12,
+        "size": 1,
+        "min": -1.0,
+        "max": 1.0,
+        "normalized": true,
+        "description": "Lateral lane error divided by lane width."
+      },
+      {
+        "name": "goal_distance",
+        "index": 13,
+        "size": 1,
+        "min": -1.0,
+        "max": 1.0,
+        "normalized": true,
+        "description": "Remaining goal distance divided by the active goal scale."
+      },
+      {
+        "name": "route_preview_points",
+        "index": 14,
+        "size": 8,
+        "min": -1.0,
+        "max": 1.0,
+        "normalized": true,
+        "layout": "xy",
+        "count": 4,
+        "description": "Four route preview points as ego-local x/y pairs."
+      },
+      {
+        "name": "road_half_widths",
+        "index": 22,
+        "size": 4,
+        "min": 0.0,
+        "max": 1.0,
+        "normalized": true,
+        "description": "Four preview road half-widths divided by the map maximum."
+      },
+      {
+        "name": "reserved_traffic_signals",
+        "index": 26,
+        "size": 5,
+        "min": -1.0,
+        "max": 1.0,
+        "normalized": true,
+        "reserved": true,
+        "expected": [0.0, 0.0, 0.0, 0.0, 1.0],
+        "description": "Reserved traffic-signal slots. Setup 1 writes [0,0,0,0,1]; changing these values requires a schema version bump."
+      }
+    ]
+  },
+  "action": {
+    "size": 2,
+    "dtype": "float32",
+    "gym_min": -1.0,
+    "gym_max": 1.0,
+    "clipping": "clip_to_bounds",
+    "fields": [
+      {
+        "name": "steering",
+        "index": 0,
+        "size": 1,
+        "min": -1.0,
+        "max": 1.0,
+        "normalized": true,
+        "description": "Continuous steering command."
+      },
+      {
+        "name": "signed_acceleration",
+        "index": 1,
+        "size": 1,
+        "min": -1.0,
+        "max": 1.0,
+        "normalized": true,
+        "description": "Positive throttle, negative brake; magnitude is normalized."
+      }
+    ]
+  }
+}

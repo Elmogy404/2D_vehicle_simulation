@@ -7,6 +7,7 @@ import csv
 from pathlib import Path
 
 from godot_gym_env import GodotRoadEnv
+from interface_schema import SCHEMA_VERSION
 from policy_checkpoint import load_policy, checkpoint_generator
 from training_metrics import summarize_evaluation, evaluation_gate
 
@@ -112,12 +113,13 @@ def main() -> None:
         and turn_coverage_rate >= arguments.success_threshold
     )
     print(
-        "SUMMARY episodes=%d stage=%d success=%.1f%% crash=%.1f%% off_road=%.1f%% "
+        "SUMMARY episodes=%d stage=%d schema=%d success=%.1f%% crash=%.1f%% off_road=%.1f%% "
         "turn_coverage=%.1f%% mean_steps=%.1f mean_turns=%.2f mean_return=%.2f "
         "gate=%s (required %.0f%%)"
         % (
             len(results),
             arguments.curriculum_stage,
+            SCHEMA_VERSION,
             100.0 * success_rate,
             100.0 * crash_rate,
             100.0 * off_road_rate,

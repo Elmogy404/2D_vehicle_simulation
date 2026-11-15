@@ -6,6 +6,12 @@ from pathlib import Path
 import zipfile
 from unittest.mock import patch
 
+from interface_schema import (
+    SchemaCompatibilityError,
+    checkpoint_spaces_error,
+    manifest_interface_error,
+)
+
 
 def manifest_for_model(path: str | Path) -> tuple[Path | None, dict]:
     path = Path(path).resolve()
@@ -38,4 +44,12 @@ def load_policy(path: str | Path, env: object = None):
         return original(member, *args, **kwargs)
 
     with patch.object(torch, "load", side_effect=buffered):
-        return PPO.load(path, env=env, device="cpu")
+        model = PPO.load(path, env=env, device="cpu")
+    _manifest_path, manifest = manifest_for_model(path)
+    manifest_error = manifest_interface_error(manifest)
+    if manifest_error:
+        raise SchemaCompatibilityError(f"Checkpoint {path} is incompatible: {manifest_error}")
+    space_error = checkpoint_spaces_error(model.observation_space, model.action_space)
+    if space_error:
+        raise SchemaCompatibilityError(f"Checkpoint {path} is incompatible: {space_error}")
+    return model

@@ -6,9 +6,15 @@ import argparse
 import math
 
 from godot_bridge import GodotBridge
+from interface_schema import (
+    OBSERVATION_SIZE,
+    metadata as interface_metadata,
+    validate_observation,
+    validate_remote_metadata,
+)
 
 
-EXPECTED_OBSERVATION_SIZE = 31
+SCHEMA_FIELDS = interface_metadata()
 GOAL_DISTANCE_RANGES = (
     (250.0, 400.0),
     (400.0, 650.0),
@@ -21,6 +27,33 @@ GOAL_DISTANCE_RANGES = (
 )
 
 
+def reset_request(seed: int, options: dict | None = None) -> dict:
+    return {
+        "type": "reset",
+        "seed": seed,
+        "options": options or {},
+        **SCHEMA_FIELDS,
+    }
+
+
+def step_request(action: list[float]) -> dict:
+    return {"type": "step", "action": action, **SCHEMA_FIELDS}
+
+
+def checked_reset(bridge: GodotBridge, seed: int, options: dict | None = None) -> dict:
+    result = bridge.request(reset_request(seed, options))
+    validate_remote_metadata(result["info"].get("interface_schema"), source="smoke reset")
+    validate_observation(result["observation"])
+    return result
+
+
+def checked_step(bridge: GodotBridge, action: list[float]) -> dict:
+    result = bridge.request(step_request(action))
+    validate_remote_metadata(result["info"].get("interface_schema"), source="smoke step")
+    validate_observation(result["observation"])
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--godot", help="Godot 4 executable; defaults to GODOT_BIN/PATH")
@@ -28,14 +61,12 @@ def main() -> None:
     arguments = parser.parse_args()
 
     with GodotBridge(arguments.godot) as bridge:
-        reset_result = bridge.request({"type": "reset", "seed": arguments.seed})
+        reset_result = checked_reset(bridge, arguments.seed)
         if not reset_result["info"].get("spawn_clear", False):
             raise RuntimeError("Training reset did not produce a collision-free spawn")
         observation = reset_result["observation"]
-        if len(observation) != EXPECTED_OBSERVATION_SIZE:
-            raise RuntimeError(f"Expected 31 observations, got {len(observation)}")
-        if not all(math.isfinite(float(value)) for value in observation):
-            raise RuntimeError("Reset observation contains non-finite values")
+        if len(observation) != OBSERVATION_SIZE:
+            raise RuntimeError(f"Expected {OBSERVATION_SIZE} observations, got {len(observation)}")
         goal_distance = float(reset_result["info"]["goal_distance"])
         if not (
             GOAL_DISTANCE_RANGES[0][0]
@@ -59,7 +90,7 @@ def main() -> None:
             )
         )
 
-        repeated_reset = bridge.request({"type": "reset", "seed": arguments.seed})
+        repeated_reset = checked_reset(bridge, arguments.seed)
         if repeated_reset["observation"] != observation:
             raise RuntimeError("Resetting with the same seed changed the initial observation")
         stable = lambda info: {k: v for k, v in info.items() if k != "reset_ms"}
@@ -68,12 +99,10 @@ def main() -> None:
         print("DETERMINISM PASS: same seed reproduces the route and initial observation")
 
         for stage, (minimum_distance, maximum_distance) in enumerate(GOAL_DISTANCE_RANGES):
-            stage_reset = bridge.request(
-                {
-                    "type": "reset",
-                    "seed": arguments.seed + stage,
-                    "options": {"curriculum": False, "curriculum_stage": stage},
-                }
+            stage_reset = checked_reset(
+                bridge,
+                arguments.seed + stage,
+                {"curriculum": False, "curriculum_stage": stage},
             )
             stage_distance = float(stage_reset["info"]["goal_distance"])
             if not stage_reset["info"].get("spawn_clear", False):
@@ -92,18 +121,14 @@ def main() -> None:
                     raise RuntimeError("Longest route tier had to fall back below its turn target")
         print("CURRICULUM PASS: all eight route-distance/turn tiers are in range")
 
-        observation = bridge.request(
-            {"type": "reset", "seed": arguments.seed}
-        )["observation"]
+        observation = checked_reset(bridge, arguments.seed)["observation"]
 
         total_reward = 0.0
         for step_index in range(12):
-            result = bridge.request({"type": "step", "action": [0.0, 0.35]})
+            result = checked_step(bridge, [0.0, 0.35])
             observation = result["observation"]
-            if len(observation) != EXPECTED_OBSERVATION_SIZE:
+            if len(observation) != OBSERVATION_SIZE:
                 raise RuntimeError(f"Step returned {len(observation)} observations")
-            if not all(math.isfinite(float(value)) for value in observation):
-                raise RuntimeError(f"Step {step_index} returned non-finite observations")
             if not math.isfinite(float(result["reward"])):
                 raise RuntimeError(f"Step {step_index} returned a non-finite reward")
             total_reward += float(result["reward"])
@@ -114,14 +139,8 @@ def main() -> None:
         from training_control import DEFAULT_REWARD_CONFIG
 
         zero_rewards = {key: 0.0 for key in DEFAULT_REWARD_CONFIG}
-        bridge.request(
-            {
-                "type": "reset",
-                "seed": arguments.seed,
-                "options": {"reward_config": zero_rewards},
-            }
-        )
-        zero_step = bridge.request({"type": "step", "action": [0.0, 0.0]})
+        checked_reset(bridge, arguments.seed, {"reward_config": zero_rewards})
+        zero_step = checked_step(bridge, [0.0, 0.0])
         if abs(float(zero_step["reward"])) > 1e-6:
             raise RuntimeError("Custom reward weights were not applied to the training world")
         print("REWARD CONFIG PASS: zeroed weights produce zero reward")

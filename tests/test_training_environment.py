@@ -15,12 +15,22 @@ from gymnasium import spaces
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ai"))
 from godot_bridge import ResetUnavailableError
 from godot_gym_env import ENVIRONMENT_VERSION, GodotRoadEnv
+from interface_schema import ACTION_SIZE, OBSERVATION_SIZE, metadata as interface_metadata
 from train import capture_training_state, restore_training_state
 import train
 
 
+def valid_observation() -> list[float]:
+    observation = [0.0] * OBSERVATION_SIZE
+    observation[-1] = 1.0
+    return observation
+
+
 def reset_response() -> dict:
-    return {"observation": [0.0] * 31, "info": {"seed": 10}}
+    return {
+        "observation": valid_observation(),
+        "info": {"seed": 10, "interface_schema": interface_metadata()},
+    }
 
 
 class EnvironmentStateTests(unittest.TestCase):
@@ -104,8 +114,8 @@ class EnvironmentStateTests(unittest.TestCase):
 
 class TinyDrivingEnv(gym.Env):
     """Fast simulator substitute to exercise real PPO checkpoint callbacks."""
-    observation_space = spaces.Box(-1.0, 1.0, shape=(31,), dtype=np.float32)
-    action_space = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+    observation_space = spaces.Box(-1.0, 1.0, shape=(OBSERVATION_SIZE,), dtype=np.float32)
+    action_space = spaces.Box(-1.0, 1.0, shape=(ACTION_SIZE,), dtype=np.float32)
 
     def __init__(self, success: bool = True, fail: bool = False) -> None:
         self.success = success
@@ -114,12 +124,12 @@ class TinyDrivingEnv(gym.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        return np.zeros(31, dtype=np.float32), {}
+        return np.zeros(OBSERVATION_SIZE, dtype=np.float32), {}
 
     def step(self, action):
         if self.fail:
             raise RuntimeError("injected environment failure")
-        return np.zeros(31, dtype=np.float32), 1.0, True, False, {
+        return np.zeros(OBSERVATION_SIZE, dtype=np.float32), 1.0, True, False, {
             "success": self.success, "turn_requirement_met": True, "route_turns": 4,
         }
 
