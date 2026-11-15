@@ -488,10 +488,11 @@ func _step_episode(action_value: Variant) -> void:
 	var terminated := false
 	var truncated := false
 	var success := false
-	var off_road := absf(float(state["lateral_offset"])) \
-		> float(state["half_width"]) - float(ego.get("vehicle_width")) * 0.5
+	var drivable_state := _drivable_state()
+	var off_road := bool(drivable_state.get("off_road", false))
 	var collision_info := _collision_info()
-	if _collision_termination_requested():
+	var collision_detected := _collision_termination_requested()
+	if collision_detected:
 		reward -= float(reward_config["crash_penalty"])
 		terminated = true
 	elif off_road:
@@ -524,11 +525,13 @@ func _step_episode(action_value: Variant) -> void:
 		"truncated": truncated,
 		"info": {
 			"success": success,
-			"crashed": _collision_termination_requested(),
+			"crashed": collision_detected,
 			"collision": collision_info,
 			"collision_count": int(collision_info.get("collision_count", 0)),
 			"terminal_collision": collision_info.get("terminal_collision", {}),
 			"off_road": off_road,
+			"off_road_and_collision": off_road and collision_detected,
+			"drivable": drivable_state,
 			"progress": current_progress,
 			"goal_progress": goal_progress,
 			"goal_distance": episode_goal_distance,
@@ -634,6 +637,12 @@ func _get_route_state() -> Dictionary:
 	driving_task.route = route
 	driving_task.last_progress = last_progress
 	return driving_task._get_route_state()
+
+
+func _drivable_state() -> Dictionary:
+	driving_task.ego = ego
+	driving_task.road_generator = road_generator
+	return driving_task.get_drivable_state()
 
 
 func _minimum_turns_for_stage(stage: int) -> int:

@@ -5,12 +5,31 @@ extends RefCounted
 const POSITION_KEY_SCALE := 10.0
 const POSITION_JOIN_TOLERANCE_SQUARED := 0.01
 
+## Drivable-area query geometry.
+##
+## Coordinate system: Godot 2D world coordinates (+X right, +Y down), angles in
+## radians. This project uses abstract "world units"; vehicle body dimensions,
+## road half-widths, and all query distances are in those same units.
+##
+## The union of the graph's straight centerline segments, each widened to the
+## authored half-width profile, is the authoritative drivable surface. Curves
+## are represented by their rendered polyline segments; intersections and road
+## mouths are the union of the incident corridors plus a junction pad at nodes
+## with three or more incident roads.
+const DRIVABLE_GRID_CELL_SIZE := 250.0
+const DRIVABLE_QUERY_SAMPLE_SPACING := 8.0
+
 var positions: Array[Vector2] = []
 var adjacency: Array = []
 var edge_half_widths: Dictionary = {}
 var edge_lane_counts: Dictionary = {}
 var edge_road_classes: Dictionary = {}
 var roundabout_nodes: PackedByteArray = PackedByteArray()
+
+var _drivable_edges: Array[Dictionary] = []
+var _drivable_nodes: Array[Dictionary] = []
+var _drivable_edge_grid: Dictionary = {}
+var _drivable_node_grid: Dictionary = {}
 
 
 func build(
@@ -80,6 +99,8 @@ func build(
 			previous = index
 			previous_half_width = half_width
 			previous_lane_count = lane_count
+
+	_rebuild_drivable_index()
 
 
 func _find_nearby_position_node(
@@ -563,6 +584,283 @@ func _smoothed_append(
 	points.append(point)
 	widths.append(half_width)
 	lanes.append(lane_count)
+
+
+# ============================================================
+# DRIVABLE AREA
+# ============================================================
+
+func _rebuild_drivable_index() -> void:
+	_drivable_edges.clear()
+	_drivable_nodes.clear()
+	_drivable_edge_grid.clear()
+	_drivable_node_grid.clear()
+
+	for key in edge_half_widths:
+		var parts := String(key).split(":")
+		if parts.size() != 2:
+			continue
+		var a := int(parts[0])
+		var b := int(parts[1])
+		if a < 0 or b < 0 or a >= positions.size() or b >= positions.size() or a == b:
+			continue
+		var start := positions[a]
+		var finish := positions[b]
+		if start.distance_squared_to(finish) < 1.0e-6:
+			continue
+		var endpoint_widths: Vector2 = edge_half_widths[key]
+		var start_half_width := endpoint_widths.x if a < b else endpoint_widths.y
+		var end_half_width := endpoint_widths.y if a < b else endpoint_widths.x
+		var edge := {
+			"start": start,
+			"end": finish,
+			"start_half_width": start_half_width,
+			"end_half_width": end_half_width,
+		}
+		var edge_index := _drivable_edges.size()
+		_drivable_edges.append(edge)
+		var radius := maxf(start_half_width, end_half_width)
+		_insert_drivable_region(
+			_drivable_edge_grid,
+			Vector2(minf(start.x, finish.x), minf(start.y, finish.y)) - Vector2.ONE * radius,
+			Vector2(maxf(start.x, finish.x), maxf(start.y, finish.y)) + Vector2.ONE * radius,
+			edge_index
+		)
+
+	# A junction node is more than the meeting point of its arms: the rendered
+	# asphalt also fills the corner between adjacent arms. A circular pad with
+	# the widest incident half-width covers that junction box for vehicle
+	# footprints without extending the query beyond the road ends.
+	for node_index in range(adjacency.size()):
+		if adjacency[node_index].size() < 3:
+			continue
+		var junction_radius := get_node_half_width(node_index)
+		if junction_radius <= 0.0:
+			continue
+		var node_position := positions[node_index]
+		var node_index_in_query := _drivable_nodes.size()
+		_drivable_nodes.append({"position": node_position, "radius": junction_radius})
+		_insert_drivable_region(
+			_drivable_node_grid,
+			node_position - Vector2.ONE * junction_radius,
+			node_position + Vector2.ONE * junction_radius,
+			node_index_in_query
+		)
+
+
+func _insert_drivable_region(
+	grid: Dictionary,
+	minimum: Vector2,
+	maximum: Vector2,
+	index: int
+) -> void:
+	var min_x := floori(minimum.x / DRIVABLE_GRID_CELL_SIZE)
+	var max_x := floori(maximum.x / DRIVABLE_GRID_CELL_SIZE)
+	var min_y := floori(minimum.y / DRIVABLE_GRID_CELL_SIZE)
+	var max_y := floori(maximum.y / DRIVABLE_GRID_CELL_SIZE)
+	for cell_x in range(min_x, max_x + 1):
+		for cell_y in range(min_y, max_y + 1):
+			var key := _drivable_cell_key(cell_x, cell_y)
+			if not grid.has(key):
+				grid[key] = []
+			var bucket: Array = grid[key]
+			bucket.append(index)
+
+
+func _drivable_cell_key(cell_x: int, cell_y: int) -> String:
+	return "%d:%d" % [cell_x, cell_y]
+
+
+## Signed distance from the nearest drivable boundary. Positive values are
+## inside the road surface, negative values are outside. Distances are in world
+## units. Returns -INF when no road corridor is nearby.
+func get_drivable_clearance(point: Vector2) -> float:
+	var key := _drivable_cell_key(
+		floori(point.x / DRIVABLE_GRID_CELL_SIZE),
+		floori(point.y / DRIVABLE_GRID_CELL_SIZE)
+	)
+	var edge_indices: Array = _drivable_edge_grid.get(key, [])
+	var node_indices: Array = _drivable_node_grid.get(key, [])
+	return _clearance_from_candidate_indices(point, edge_indices, node_indices)
+
+
+func is_point_drivable(point: Vector2, margin: float = 0.0) -> bool:
+	return get_drivable_clearance(point) >= -margin
+
+
+## Evaluate the oriented vehicle rectangle against the road-corridor union.
+## `size` is (width, length) in world units. `margin` permits that many units
+## of the footprint outside the road, which is useful for boundary float error
+## and authored curb insets. The rectangle is sampled on its perimeter plus a
+## coarse interior lattice; `sample_spacing_units` bounds the sampling error.
+func query_footprint_drivable(
+	center: Vector2,
+	rotation: float,
+	size: Vector2,
+	margin: float = 0.0,
+	sample_spacing_units: float = DRIVABLE_QUERY_SAMPLE_SPACING
+) -> Dictionary:
+	if size.x <= 0.0 or size.y <= 0.0:
+		return {
+			"drivable": false,
+			"center_drivable": false,
+			"inside_sample_count": 0,
+			"outside_sample_count": 0,
+			"sample_count": 0,
+			"inside_fraction": 0.0,
+			"min_clearance_units": null,
+			"max_outside_depth_units": null,
+			"center_clearance_units": null,
+			"footprint_size": [size.x, size.y],
+			"margin_units": margin,
+			"sample_spacing_units": sample_spacing_units,
+		}
+
+	var right := Vector2.RIGHT.rotated(rotation)
+	var forward := Vector2.UP.rotated(rotation)
+	var half_width := size.x * 0.5
+	var half_length := size.y * 0.5
+	var corners := PackedVector2Array([
+		center - right * half_width - forward * half_length,
+		center + right * half_width - forward * half_length,
+		center + right * half_width + forward * half_length,
+		center - right * half_width + forward * half_length,
+	])
+	var minimum := corners[0]
+	var maximum := corners[0]
+	for corner in corners:
+		minimum.x = minf(minimum.x, corner.x)
+		minimum.y = minf(minimum.y, corner.y)
+		maximum.x = maxf(maximum.x, corner.x)
+		maximum.y = maxf(maximum.y, corner.y)
+
+	var edge_candidates: Dictionary = {}
+	var node_candidates: Dictionary = {}
+	_collect_region_candidates(minimum, maximum, edge_candidates, node_candidates)
+	var edge_indices: Array = edge_candidates.keys()
+	var node_indices: Array = node_candidates.keys()
+
+	var spacing := maxf(sample_spacing_units, 1.0)
+	var samples := _footprint_samples(center, right, forward, half_width, half_length, spacing)
+	var inside_count := 0
+	var min_clearance := INF
+	for sample in samples:
+		var clearance := _clearance_from_candidate_indices(sample, edge_indices, node_indices)
+		min_clearance = minf(min_clearance, clearance)
+		if clearance >= -margin:
+			inside_count += 1
+
+	var center_clearance := _clearance_from_candidate_indices(center, edge_indices, node_indices)
+	var sample_count := samples.size()
+	return {
+		"drivable": inside_count == sample_count,
+		"center_drivable": center_clearance >= -margin,
+		"inside_sample_count": inside_count,
+		"outside_sample_count": sample_count - inside_count,
+		"sample_count": sample_count,
+		"inside_fraction": float(inside_count) / float(maxi(sample_count, 1)),
+		"min_clearance_units": min_clearance if is_finite(min_clearance) else null,
+		"max_outside_depth_units": (
+			maxf(0.0, -min_clearance) if is_finite(min_clearance) else null
+		),
+		"center_clearance_units": center_clearance if is_finite(center_clearance) else null,
+		"footprint_size": [size.x, size.y],
+		"margin_units": margin,
+		"sample_spacing_units": spacing,
+	}
+
+
+func is_footprint_drivable(
+	center: Vector2,
+	rotation: float,
+	size: Vector2,
+	margin: float = 0.0,
+	sample_spacing_units: float = DRIVABLE_QUERY_SAMPLE_SPACING
+) -> bool:
+	return bool(query_footprint_drivable(
+		center, rotation, size, margin, sample_spacing_units
+	).get("drivable", false))
+
+
+func _footprint_samples(
+	center: Vector2,
+	right: Vector2,
+	forward: Vector2,
+	half_width: float,
+	half_length: float,
+	spacing: float
+) -> PackedVector2Array:
+	var result := PackedVector2Array()
+	var x_steps := maxi(1, ceili((half_width * 2.0) / spacing))
+	var y_steps := maxi(1, ceili((half_length * 2.0) / spacing))
+	for x_index in range(x_steps + 1):
+		var x := -half_width + (half_width * 2.0) * float(x_index) / float(x_steps)
+		result.append(center + right * x - forward * half_length)
+		result.append(center + right * x + forward * half_length)
+	for y_index in range(1, y_steps):
+		var y := -half_length + (half_length * 2.0) * float(y_index) / float(y_steps)
+		result.append(center - right * half_width + forward * y)
+		result.append(center + right * half_width + forward * y)
+	# A coarse interior lattice catches a footprint straddling a non-drivable
+	# gap while its perimeter happens to lie on two separate road corridors.
+	for y_index in range(1, y_steps, 2):
+		var y := -half_length + (half_length * 2.0) * float(y_index) / float(y_steps)
+		for x_index in range(1, x_steps, 2):
+			var x := -half_width + (half_width * 2.0) * float(x_index) / float(x_steps)
+			result.append(center + right * x + forward * y)
+	result.append(center)
+	return result
+
+
+func _collect_region_candidates(
+	minimum: Vector2,
+	maximum: Vector2,
+	edge_candidates: Dictionary,
+	node_candidates: Dictionary
+) -> void:
+	var min_x := floori(minimum.x / DRIVABLE_GRID_CELL_SIZE)
+	var max_x := floori(maximum.x / DRIVABLE_GRID_CELL_SIZE)
+	var min_y := floori(minimum.y / DRIVABLE_GRID_CELL_SIZE)
+	var max_y := floori(maximum.y / DRIVABLE_GRID_CELL_SIZE)
+	for cell_x in range(min_x, max_x + 1):
+		for cell_y in range(min_y, max_y + 1):
+			var key := _drivable_cell_key(cell_x, cell_y)
+			for index in _drivable_edge_grid.get(key, []):
+				edge_candidates[int(index)] = true
+			for index in _drivable_node_grid.get(key, []):
+				node_candidates[int(index)] = true
+
+
+func _clearance_from_candidate_indices(
+	point: Vector2,
+	edge_indices: Array,
+	node_indices: Array
+) -> float:
+	var best := -INF
+	for index in edge_indices:
+		best = maxf(best, _edge_clearance(_drivable_edges[int(index)], point))
+	for index in node_indices:
+		var node: Dictionary = _drivable_nodes[int(index)]
+		var node_distance: float = point.distance_to(node["position"])
+		best = maxf(best, float(node["radius"]) - node_distance)
+	return best
+
+
+func _edge_clearance(edge: Dictionary, point: Vector2) -> float:
+	var start: Vector2 = edge["start"]
+	var finish: Vector2 = edge["end"]
+	var segment := finish - start
+	var length_squared := segment.length_squared()
+	var weight := 0.0
+	if length_squared > 0.0:
+		weight = clampf((point - start).dot(segment) / length_squared, 0.0, 1.0)
+	var closest := start + segment * weight
+	var half_width := lerpf(
+		float(edge["start_half_width"]),
+		float(edge["end_half_width"]),
+		weight
+	)
+	return half_width - point.distance_to(closest)
 
 
 func nearest_node(world_position: Vector2) -> int:

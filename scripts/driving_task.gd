@@ -12,6 +12,14 @@ const GOAL_RADIUS := 85.0
 const MAX_GOAL_DISTANCE := 6000.0
 const ROAD_PREVIEW_DISTANCES := [60.0, 120.0, 240.0, 400.0]
 const OBSERVATION_SIZE := 31
+# Border tolerance for footprint membership. 0.5 world units is well below the
+# 62-unit vehicle width and covers polyline curvature error (a radius-131 curve
+# sampled at the network's spacing deviates by less than 0.25 units).
+const DRIVABLE_MARGIN := 0.5
+# Perimeter/interior sampling resolution for the vehicle rectangle. Smaller
+# values reduce the chance of missing a thin outside sliver; 8 units is about
+# 13% of the vehicle width.
+const DRIVABLE_SAMPLE_SPACING := 8.0
 var ego: CharacterBody2D
 var road_generator: Node
 var route: RoutePath
@@ -23,6 +31,7 @@ var base_max_speed := 500.0
 var validation_cache: Dictionary = {}
 var trip_rejections: Dictionary = {}
 var clearance_queries: Dictionary = {}
+var last_drivable_state: Dictionary = {}
 
 func _select_trip(goal_range: Vector2) -> Dictionary:
 	trip_rejections = {"geometry": 0, "spawn": 0, "turns": 0, "goal": 0, "path": 0}
@@ -173,6 +182,53 @@ func _get_route_state() -> Dictionary:
 		"heading_error": direction.angle_to(Vector2.UP.rotated(ego.global_rotation)),
 		"half_width": route.get_half_width_at(progress)
 	}
+
+
+## Authoritative road-membership query shared by gameplay and RL. It is based
+## on the generated RoadNetwork corridor union, not on route lateral offset and
+## not on wall-contact proximity rays. The ego's oriented rectangle is sampled
+## so a partially outside vehicle is off-road even when its center is inside.
+func get_drivable_state() -> Dictionary:
+	var unavailable := {
+		"available": false,
+		"off_road": false,
+		"center_off_road": false,
+		"drivable": false,
+		"center_drivable": false,
+	}
+	if ego == null or road_generator == null:
+		last_drivable_state = unavailable
+		return unavailable
+	var network: Object = road_generator.call("get_road_network")
+	if network == null or not network.has_method("query_footprint_drivable"):
+		last_drivable_state = unavailable
+		return unavailable
+	var footprint := _ego_footprint_size()
+	if footprint.x <= 0.0 or footprint.y <= 0.0:
+		last_drivable_state = unavailable
+		return unavailable
+	var state: Dictionary = network.call(
+		"query_footprint_drivable",
+		ego.global_position,
+		ego.global_rotation,
+		footprint,
+		DRIVABLE_MARGIN,
+		DRIVABLE_SAMPLE_SPACING
+	)
+	state["available"] = true
+	state["off_road"] = not bool(state.get("drivable", false))
+	state["center_off_road"] = not bool(state.get("center_drivable", false))
+	last_drivable_state = state.duplicate(true)
+	return state
+
+
+func _ego_footprint_size() -> Vector2:
+	if ego.has_method("get_footprint_size"):
+		return ego.call("get_footprint_size")
+	return Vector2(
+		float(ego.get("vehicle_width")),
+		float(ego.get("vehicle_length"))
+	)
 
 
 func _lane_center_offset_at(progress: float) -> float:

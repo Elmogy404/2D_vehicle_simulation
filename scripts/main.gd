@@ -124,11 +124,10 @@ func _physics_process(_delta: float) -> void:
 		return
 
 	var route_state := _get_ai_route_state()
-	var safe_half_width: float = maxf(
-		float(route_state["half_width"]) - float(ego_vehicle.get("vehicle_width")) * 0.5,
-		1.0
-	)
-	if absf(float(route_state["lateral_offset"])) > safe_half_width:
+	live_driving_task.ego = ego_vehicle
+	live_driving_task.road_generator = road_generator
+	var drivable_state: Dictionary = live_driving_task.call("get_drivable_state")
+	if bool(drivable_state.get("off_road", false)):
 		ai_failed = true
 		ai_status = "The AI left the drivable road. Press R to retry or I to return."
 		_stop_vehicle_for_ai_result()

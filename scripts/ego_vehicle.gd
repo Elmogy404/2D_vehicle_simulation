@@ -540,6 +540,11 @@ func get_speed_kmh() -> float:
 	return velocity.length() * kmh_per_unit
 
 
+## Oriented footprint dimensions used by road-area queries: width, length.
+func get_footprint_size() -> Vector2:
+	return Vector2(vehicle_width, vehicle_length)
+
+
 ## Impact speed for the Game Over screen.
 func get_crash_kmh() -> float:
 	return crash_speed * kmh_per_unit
