@@ -7,6 +7,7 @@ from collections import deque
 from pathlib import Path
 
 from godot_gym_env import GodotRoadEnv
+from deterministic_seeds import set_global_seeds
 from interface_schema import SchemaCompatibilityError
 
 
@@ -44,6 +45,7 @@ def main() -> None:
     arguments = parser.parse_args()
     if arguments.curriculum_stage not in range(8):
         parser.error("--curriculum-stage must be from 0 to 7")
+    set_global_seeds(arguments.seed)
 
     model_path = Path(arguments.model) if arguments.model else None
     try:

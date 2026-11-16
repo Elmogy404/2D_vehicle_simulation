@@ -43,6 +43,19 @@ The optional lifecycle test starts an isolated short PPO run and checks
 pause/resume/save. Results and full output go to `ai/runs/project_checks.json`.
 See `../IMPROVEMENTS.md` for the seven-part implementation and verification.
 
+Reproducibility, episode recording, replay, and CI are documented in
+[`DETERMINISM.md`](DETERMINISM.md). Quick examples:
+
+```powershell
+python ai/evaluate.py --model ai/models/<checkpoint>.zip `
+  --episodes 1 --seed 20000 --curriculum-stage 0 --record ai/runs/episode.jsonl
+python ai/replay_episode.py --recording ai/runs/episode.jsonl --atol 1e-6 --rtol 1e-6
+python tests/ai_replay_integration.py --godot "C:\path\to\Godot.exe"
+```
+
+`tests/run_checks.py` now also runs the live record-replay integration and the
+headless deterministic seed test.
+
 Environment version 3 accelerates headless simulation, removes a conflicting
 lane/edge reward, and introduces gradual first-turn practice. Start a **new
 training run** after updating; earlier checkpoints remain available for

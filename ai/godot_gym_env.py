@@ -9,6 +9,11 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from godot_bridge import GodotBridge, ResetUnavailableError
+from deterministic_seeds import (
+    SEED_DERIVATION_NAME,
+    environment_seed,
+    validate_master_seed,
+)
 from interface_schema import (
     ACTION_SIZE,
     OBSERVATION_SIZE,
@@ -22,7 +27,7 @@ from interface_schema import (
     validate_observation,
     validate_remote_metadata,
 )
-from reward_config import validate_reward_config
+from reward_config import reward_config_hash, validate_reward_config
 
 
 ENVIRONMENT_VERSION = 3
@@ -30,6 +35,8 @@ ENVIRONMENT_VERSION = 3
 
 class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
     """Empty-road route-following environment backed by a Godot subprocess."""
+
+    environment_version = ENVIRONMENT_VERSION
 
     metadata = {
         "render_modes": [],
@@ -47,11 +54,17 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
         parent_window_id: int | None = None,
         close_visible_on_exit: bool = False,
         generator_type: str = "original",
+        master_seed: int | None = None,
+        worker_index: int = 0,
     ) -> None:
         super().__init__()
         if generator_type not in {"original", "segmented"}:
             raise ValueError("generator_type must be original or segmented")
+        if isinstance(worker_index, bool) or not isinstance(worker_index, int) or worker_index < 0:
+            raise ValueError("worker_index must be a non-negative integer")
         self.generator_type = generator_type
+        self.worker_index = worker_index
+        self.master_seed = None if master_seed is None else validate_master_seed(master_seed)
         self.action_space = spaces.Box(
             low=action_space_low(),
             high=action_space_high(),
@@ -71,6 +84,22 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
                                   parent_window_id=parent_window_id,
                                   close_visible_on_exit=close_visible_on_exit)
         self._pending_training_state: dict[str, Any] | None = None
+        if self.master_seed is not None:
+            # Give the worker a deterministic stream even when it is used
+            # without SB3 (which otherwise supplies the first explicit seed).
+            super().reset(seed=environment_seed(self.master_seed, self.worker_index))
+
+    def environment_config(self) -> dict[str, Any]:
+        """Metadata needed to identify and reproduce this environment."""
+        return {
+            "environment_version": ENVIRONMENT_VERSION,
+            "interface_schema": interface_metadata(),
+            "generator_type": self.generator_type,
+            "reward_config": dict(self.reward_config),
+            "reward_config_hash": reward_config_hash(self.reward_config),
+            "master_seed": self.master_seed,
+            "worker_index": self.worker_index,
+        }
 
     def reset(
         self,
@@ -115,6 +144,9 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
         validate_remote_metadata(info.get("interface_schema"), source="Godot reset response")
         observation = validate_observation(response["observation"])
         info.update(requested_seed=episode_seed, reset_retries=attempt)
+        info["master_seed"] = self.master_seed
+        info["worker_index"] = self.worker_index
+        info["seed_derivation"] = SEED_DERIVATION_NAME
         info["godot_pid"] = self.bridge.process_id
         return observation, info
 

@@ -10,6 +10,13 @@ from pathlib import Path
 
 from godot_gym_env import ENVIRONMENT_VERSION, GodotRoadEnv
 from interface_schema import SchemaCompatibilityError, metadata as interface_metadata
+from deterministic_seeds import (
+    SEED_DERIVATION_NAME,
+    code_revision,
+    determinism_metadata,
+    set_global_seeds,
+)
+from episode_recording import RECORDING_FORMAT_VERSION
 from reward_config import SCHEMA_VERSION as REWARD_SCHEMA_VERSION, reward_config_hash
 from training_control import TrainingControl, parse_reward_config
 from training_config import TRAINING_DEFAULTS, prepare_manifest, runtime_provenance
@@ -21,13 +28,21 @@ from policy_checkpoint import (
 
 
 def make_training_env(godot_executable: str | None, reward_config: dict[str, float], generator_type: str = "original", *,
-                      parent_window_id: int | None = None) -> object:
+                      parent_window_id: int | None = None, master_seed: int | None = None,
+                      worker_index: int = 0) -> object:
     from stable_baselines3.common.monitor import Monitor
 
     if parent_window_id is None:
-        return Monitor(GodotRoadEnv(godot_executable, reward_config=reward_config, generator_type=generator_type))
+        return Monitor(GodotRoadEnv(
+            godot_executable,
+            reward_config=reward_config,
+            generator_type=generator_type,
+            master_seed=master_seed,
+            worker_index=worker_index,
+        ))
     return Monitor(GodotRoadEnv(godot_executable, reward_config=reward_config, visible=True,
-                               parent_window_id=parent_window_id, close_visible_on_exit=True, generator_type=generator_type))
+                               parent_window_id=parent_window_id, close_visible_on_exit=True, generator_type=generator_type,
+                               master_seed=master_seed, worker_index=worker_index))
 
 
 def capture_training_state(model: object) -> None:
@@ -134,6 +149,7 @@ def main() -> None:
     if not 1 <= arguments.torch_threads <= 64 or not 1 <= arguments.eval_workers <= 32:
         parser.error("thread and evaluation worker counts must be positive and within their supported limits")
     torch.set_num_threads(arguments.torch_threads)
+    global_seeds = set_global_seeds(arguments.seed)
     if arguments.steps < 1:
         parser.error("--steps must be at least 1")
     if arguments.n_envs < 1:
@@ -181,11 +197,25 @@ def main() -> None:
     model_dir = output_root / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = model_dir / f"{arguments.run_name}_training_config.json"
+    determinism = determinism_metadata(
+        arguments.seed,
+        workers=arguments.n_envs,
+        evaluation_seed=arguments.eval_seed,
+        final_evaluation_seed=arguments.final_eval_seed,
+        replay_format_version=RECORDING_FORMAT_VERSION,
+    )
     manifest = {
         "environment_version": ENVIRONMENT_VERSION,
         "interface_schema": interface_metadata(),
         "generator_type": arguments.generator_type,
         "workers": arguments.n_envs,
+        "seed": arguments.seed,
+        "seed_config": determinism["seed_plan"],
+        "determinism": {
+            **determinism,
+            "global_seeds": global_seeds,
+            "seed_derivation": SEED_DERIVATION_NAME,
+        },
         "evaluation": {"seed": arguments.eval_seed, "episodes": arguments.eval_episodes, "threshold": arguments.success_threshold},
         "reward_config": reward_config,
         "reward_config_schema_version": REWARD_SCHEMA_VERSION,
@@ -196,6 +226,7 @@ def main() -> None:
         "entropy_coefficient": arguments.entropy_coefficient,
     }
     manifest["runtime"] = runtime_provenance()
+    manifest["runtime"]["code_revision"] = code_revision()
     manifest["training_options"] = {key: getattr(arguments, "n_envs" if key == "workers" else key)
                                     for key in TRAINING_DEFAULTS if key not in {"run_name", "resume", "output_root"}}
     try:
@@ -223,13 +254,18 @@ def main() -> None:
     rollout_steps = ((rollout_steps + alignment - 1) // alignment) * alignment
     try:
         if arguments.n_envs == 1:
-            env = (make_training_env(arguments.godot, reward_config, arguments.generator_type, parent_window_id=visual_parents[0])
-                   if visual_parents else make_training_env(arguments.godot, reward_config, arguments.generator_type))
+            env = (make_training_env(arguments.godot, reward_config, arguments.generator_type,
+                                     parent_window_id=visual_parents[0], master_seed=arguments.seed, worker_index=0)
+                   if visual_parents else make_training_env(arguments.godot, reward_config, arguments.generator_type,
+                                                            master_seed=arguments.seed, worker_index=0))
         else:
             env = SubprocVecEnv(
-                [partial(make_training_env, arguments.godot, reward_config, arguments.generator_type, parent_window_id=parent)
-                 for parent in visual_parents] if visual_parents else
-                [partial(make_training_env, arguments.godot, reward_config, arguments.generator_type) for _ in range(arguments.n_envs)],
+                [partial(make_training_env, arguments.godot, reward_config, arguments.generator_type,
+                         parent_window_id=parent, master_seed=arguments.seed, worker_index=index)
+                 for index, parent in enumerate(visual_parents)] if visual_parents else
+                [partial(make_training_env, arguments.godot, reward_config, arguments.generator_type,
+                         master_seed=arguments.seed, worker_index=index)
+                 for index in range(arguments.n_envs)],
                 start_method="spawn",
             )
     except Exception as error:

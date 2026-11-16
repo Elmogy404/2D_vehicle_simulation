@@ -7,6 +7,8 @@ import csv
 from pathlib import Path
 
 from godot_gym_env import GodotRoadEnv
+from deterministic_seeds import set_global_seeds
+from episode_recording import EpisodeRecorder
 from interface_schema import SCHEMA_VERSION, SchemaCompatibilityError
 from policy_checkpoint import (
     STRATEGIES,
@@ -45,6 +47,22 @@ def main() -> None:
     )
     parser.add_argument("--output-csv", help="Optional path for per-episode metrics")
     parser.add_argument(
+        "--record",
+        type=Path,
+        help="Write one versioned deterministic replay recording to this JSONL path",
+    )
+    parser.add_argument(
+        "--record-episode",
+        type=int,
+        default=0,
+        help="Zero-based evaluation episode to record when --record is used",
+    )
+    parser.add_argument(
+        "--record-full-info",
+        action="store_true",
+        help="Store the complete per-step info payload instead of the compact replay fields",
+    )
+    parser.add_argument(
         "--visible",
         action="store_true",
         help="Open the Godot Setup 2 world window while evaluating the policy",
@@ -58,6 +76,9 @@ def main() -> None:
         parser.error("--curriculum-stage must be from 0 to 7")
     if not 0.0 <= arguments.success_threshold <= 1.0:
         parser.error("--success-threshold must be between 0 and 1")
+    if arguments.record_episode not in range(arguments.episodes):
+        parser.error("--record-episode must identify an episode in the requested evaluation range")
+    set_global_seeds(arguments.seed)
 
     model_path = Path(arguments.model) if arguments.model else None
     try:
@@ -92,26 +113,59 @@ def main() -> None:
         generator_type=checkpoint_generator(resolved.path, arguments.generator_type, manifest=resolved.manifest_path),
     )
     results: list[dict[str, float | bool]] = []
+    recorder: EpisodeRecorder | None = None
     try:
         for episode in range(arguments.episodes):
             stage = episode % 8 if arguments.all_stages else arguments.curriculum_stage
+            reset_options = {
+                "curriculum": False,
+                "curriculum_stage": stage,
+            }
+            if arguments.record and episode == arguments.record_episode:
+                recorder = EpisodeRecorder(
+                    arguments.record,
+                    environment_version=env.environment_version,
+                    reward_config=reward_config,
+                    generator_type=env.generator_type,
+                    master_seed=arguments.seed,
+                    capture_full_info=arguments.record_full_info,
+                )
             observation, _info = env.reset(
                 seed=arguments.seed + episode,
-                options={
-                    "curriculum": False,
-                    "curriculum_stage": stage,
-                },
+                options=reset_options,
             )
+            if recorder is not None:
+                recorder.record_reset(
+                    observation,
+                    _info,
+                    episode_seed=arguments.seed + episode,
+                    options=reset_options,
+                )
             episode_return = 0.0
             steps = 0
             final_info: dict[str, object] = {}
+            terminated = truncated = False
             while True:
                 action, _state = model.predict(observation, deterministic=True)
                 observation, reward, terminated, truncated, final_info = env.step(action)
                 episode_return += reward
                 steps += 1
+                if recorder is not None:
+                    recorder.record_step(
+                        index=steps - 1,
+                        action=action,
+                        observation=observation,
+                        reward=reward,
+                        terminated=terminated,
+                        truncated=truncated,
+                        info=final_info,
+                    )
                 if terminated or truncated:
                     break
+            if recorder is not None:
+                recorder.close(terminated=terminated, truncated=truncated)
+                print(f"Recorded replay episode to {arguments.record}")
+                recorder = None
             results.append(
                 {
                     "seed": arguments.seed + episode,
@@ -140,6 +194,8 @@ def main() -> None:
                 )
             )
     finally:
+        if recorder is not None:
+            recorder.close()
         env.close()
 
     count = float(len(results))

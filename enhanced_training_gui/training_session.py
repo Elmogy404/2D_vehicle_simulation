@@ -67,6 +67,8 @@ def resume_settings(checkpoint: str | Path) -> dict:
         raise ValueError("This checkpoint belongs to an older environment. Start a fresh version 3 run.")
     result = {key: manifest[key] for key in
         ("workers", "learning_rate", "batch_size", "gamma", "entropy_coefficient")}
+    if "seed" in manifest:
+        result["seed"] = manifest["seed"]
     evaluation = manifest["evaluation"]
     result.update(run_name=manifest_path.name.removesuffix("_training_config.json"),
         generator_type=manifest.get("generator_type", "original"),

@@ -20,6 +20,12 @@ SPEC = json.loads((ROOT / "ai/training_defaults.json").read_text(encoding="utf-8
 TRAINING_DEFAULTS = SPEC["training"]
 REWARD_DEFAULTS = reward_defaults()
 
+# Source fingerprint produced immediately before deterministic seed/replay
+# metadata was added.  It is accepted only for resume compatibility: the
+# simulation dynamics and environment version are unchanged, while the old
+# manifest simply has no seed provenance to verify.
+PRE_DETERMINISTIC_SOURCE_HASH = "f9ab70f36fe70170253cffa63870f29264101781deadfb6349ae195f8e9c6873"
+
 
 def runtime_provenance() -> dict:
     digest = hashlib.sha256()
@@ -54,6 +60,12 @@ def prepare_manifest(path: Path, manifest: dict, *, resume: bool) -> None:
                 raise ValueError(f"Resume settings differ for {key}; keep the original values or start a new run.")
         previous_reward = previous.get("reward_config")
         requested_reward = manifest.get("reward_config")
+        previous_seed = previous.get("seed")
+        requested_seed = manifest.get("seed")
+        if previous_seed is not None and previous_seed != requested_seed:
+            raise ValueError(
+                "Resume seed differs from the original run; keep the original --seed or start a new run."
+            )
         previous_schema = previous.get("reward_config_schema_version")
         if previous_schema is not None and previous_schema != REWARD_SCHEMA_VERSION:
             raise ValueError(
@@ -105,8 +117,17 @@ def prepare_manifest(path: Path, manifest: dict, *, resume: bool) -> None:
         if previous.get("interface_schema") is not None \
                 and previous.get("interface_schema") != manifest.get("interface_schema"):
             raise ValueError("Resume interface schema differs; keep the original observation/action contract or start a new run.")
-        if previous.get("runtime", {}).get("source_hash") not in (None, manifest.get("runtime", {}).get("source_hash")):
-            raise ValueError("Simulation source changed since this run. Start a new experiment instead of mixing environments.")
+        previous_source_hash = previous.get("runtime", {}).get("source_hash")
+        current_source_hash = manifest.get("runtime", {}).get("source_hash")
+        if previous_source_hash not in (None, current_source_hash):
+            if previous_source_hash == PRE_DETERMINISTIC_SOURCE_HASH:
+                print(
+                    "Warning: this checkpoint predates seed/replay provenance. "
+                    "Resume will use the requested seed; dynamics and environment version are unchanged.",
+                    flush=True,
+                )
+            else:
+                raise ValueError("Simulation source changed since this run. Start a new experiment instead of mixing environments.")
         return
     name = path.name.removesuffix("_training_config.json")
     if run_exists(path.parent, name):

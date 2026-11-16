@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -142,13 +143,30 @@ class TinyDrivingEnv(gym.Env):
 
 
 class TrainerCheckpointTests(unittest.TestCase):
+    def test_training_manifest_records_seed_and_replay_metadata(self) -> None:
+        from stable_baselines3.common.monitor import Monitor
+        with tempfile.TemporaryDirectory() as directory:
+            argv = ["train.py", "--steps", "64", "--seed", "4242", "--run-name", "seed_metadata_test",
+                    "--output-root", directory, "--eval-every", "0", "--early-stop-patience", "0"]
+            with patch.object(train, "make_training_env", side_effect=lambda *args, **kwargs: Monitor(TinyDrivingEnv())), patch.object(sys, "argv", argv):
+                train.main()
+            manifest = json.loads((Path(directory) / "models/seed_metadata_test_training_config.json").read_text())
+            self.assertEqual(manifest["seed"], 4242)
+            self.assertEqual(manifest["seed_config"]["master_seed"], 4242)
+            self.assertEqual(manifest["seed_config"]["derivation"], "sha256-components-v1")
+            self.assertEqual(manifest["seed_config"]["evaluation_seed"], 10000)
+            self.assertEqual(manifest["seed_config"]["final_evaluation_seed"], 1000000)
+            self.assertIn("seed_plan", manifest["determinism"])
+            self.assertEqual(manifest["determinism"]["seed_plan"]["replay_format_version"], 1)
+            self.assertEqual(manifest["determinism"]["global_generators"], ["python.random", "numpy.random", "torch"])
+
     def test_unwritable_gui_status_does_not_abort_ppo_or_its_model_save(self) -> None:
         from stable_baselines3.common.monitor import Monitor
         with tempfile.TemporaryDirectory() as directory:
             status_path = Path(directory) / "status.json"
             argv = ["train.py", "--steps", "64", "--run-name", "status_lock_test", "--output-root", directory,
                     "--eval-every", "0", "--early-stop-patience", "0", "--status-file", str(status_path)]
-            with patch.object(train, "make_training_env", side_effect=lambda *args: Monitor(TinyDrivingEnv())), patch.object(sys, "argv", argv), patch("training_control.write_json_atomic", side_effect=PermissionError(13, "persistent status lock")), self.assertLogs("training_control", level="WARNING"):
+            with patch.object(train, "make_training_env", side_effect=lambda *args, **kwargs: Monitor(TinyDrivingEnv())), patch.object(sys, "argv", argv), patch("training_control.write_json_atomic", side_effect=PermissionError(13, "persistent status lock")), self.assertLogs("training_control", level="WARNING"):
                 train.main()
             saved = Path(directory) / "models/status_lock_test.zip"
             self.assertTrue(saved.is_file())
@@ -161,13 +179,13 @@ class TrainerCheckpointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = ["train.py", "--run-name", "checkpoint_test", "--output-root", directory,
                     "--eval-every", "1024", "--eval-episodes", "8", "--early-stop-patience", "0"]
-            with patch.object(train, "make_training_env", side_effect=lambda *args: Monitor(TinyDrivingEnv())), patch.object(sys, "argv", base + ["--steps", "64"]):
+            with patch.object(train, "make_training_env", side_effect=lambda *args, **kwargs: Monitor(TinyDrivingEnv())), patch.object(sys, "argv", base + ["--steps", "64"]):
                 train.main()
             best = Path(directory) / "models/checkpoint_test_best.zip"
             original_best = best.read_bytes()
             latest = Path(directory) / "models/checkpoint_test.zip"
             restored_envs = []
-            def make_env(*args):
+            def make_env(*args, **kwargs):
                 env = TinyDrivingEnv(success=False)
                 env.stage = 0
                 restored_envs.append(env)
@@ -182,7 +200,7 @@ class TrainerCheckpointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             argv = ["train.py", "--steps", "64", "--run-name", "recovery_test", "--output-root", directory,
                     "--eval-every", "0", "--early-stop-patience", "0"]
-            with patch.object(train, "make_training_env", side_effect=lambda *args: Monitor(TinyDrivingEnv(fail=True))), patch.object(sys, "argv", argv):
+            with patch.object(train, "make_training_env", side_effect=lambda *args, **kwargs: Monitor(TinyDrivingEnv(fail=True))), patch.object(sys, "argv", argv):
                 with self.assertRaisesRegex(RuntimeError, "injected environment failure"):
                     train.main()
             recovery = list((Path(directory) / "models").glob("recovery_test_recovery_*_steps.zip"))
