@@ -2,9 +2,10 @@
 
 ## Current training and verification
 
-The CLI, Godot training tab, and Training Studio share defaults in
-`training_defaults.json`. Core dependency versions are pinned in
-`requirements.txt`; setup requires Python 3.12 or newer.
+The CLI, Godot training tab, and Training Studio share training defaults in
+`training_defaults.json` and reward defaults/rules in `reward_config.json`.
+Core dependency versions are pinned in `requirements.txt`; setup requires
+Python 3.12 or newer.
 
 Choose `original` or `segmented` roads in either interface, or pass
 `--generator-type segmented` to `train.py`. Evaluation and model presentation
@@ -82,6 +83,80 @@ Setup 1 proved basic empty-road lane following. Setup 2 now trains an empty-road
 policy to follow planned trips through the connected district street graph,
 including intersections, turns, changing widths, and 4,200–5,500-unit routes.
 The staged plan is in [`AI_ROADMAP.md`](../AI_ROADMAP.md).
+
+## Reward configuration and validation
+
+`reward_config.json` is the single source of truth for reward names, defaults,
+labels, UI steps, ranges, and signedness. `reward_config.py` validates complete
+configurations and explicit overrides for training and evaluation, while
+`scripts/reward_config.gd` loads the same JSON for the Godot environment and
+training tab. Do not duplicate reward defaults or bounds in another file.
+
+A complete configuration contains all ten keys:
+
+```json
+{
+  "progress_gain": 1.0,
+  "max_speed_reward": 0.0,
+  "lane_penalty": 0.12,
+  "edge_penalty": 0.6,
+  "heading_penalty": 0.08,
+  "step_penalty": 0.01,
+  "crash_penalty": 35.0,
+  "off_road_penalty": 35.0,
+  "goal_reward": 40.0,
+  "timeout_penalty": 20.0
+}
+```
+
+Every key is required in a complete configuration. `progress_gain`,
+`goal_reward`, and the penalty fields are non-negative magnitudes.
+`max_speed_reward` is the intentional signed term: a negative value penalizes
+top speed, while zero disables the term. Zero is valid for every component and
+disables that component. Values must be finite numbers in their declared
+range; booleans, strings, nulls, arrays, NaN, and Infinity are rejected.
+All penalty fields are non-negative because `rl_training_world.gd` subtracts
+them; a negative penalty would silently turn a penalty into a bonus.
+
+Complete configurations recorded in manifests are validated strictly, so a
+missing field is an error rather than a silent fallback. CLI/GUI reward
+overrides and `--reward-config-file` are intentionally partial: they are
+merged with the documented defaults, validated, and then expanded into a
+complete effective configuration before training starts. Unknown keys, invalid
+versions, and nested/flat conflicts are always rejected. A versioned nested
+document is also accepted:
+
+```json
+{"schema_version": 1, "reward_config": {"goal_reward": 75.0}}
+```
+
+The current configuration version is `1`. A present `schema_version` or its
+legacy alias `config_version` must be an integer and must match; unsupported
+versions fail. A nested `reward_config` object cannot be mixed with flat reward
+keys, and duplicate JSON keys are rejected. Error messages identify the exact
+field, for example:
+
+```text
+reward_config.goal_reward: must be non-negative ... (got -1)
+reward_config.typo_penalty: unknown reward field
+reward_config.goal_reward: required field is missing
+```
+
+Training writes the effective configuration, `reward_config_schema_version`,
+and a stable SHA-256 `reward_config_hash` to the run manifest. Resume validates
+the previous manifest, verifies its hash when present, and requires the same
+effective reward values. Evaluation and the visible watch tool load the
+configuration recorded beside the selected checkpoint, so they cannot silently
+use different reward settings. A legacy manifest without a reward block is
+accepted with an explicit warning and uses the current defaults; its provenance
+cannot be verified. Manifests created before hashes were introduced remain
+valid when their recorded reward values pass the current rules.
+
+To add a reward component, define it once in `reward_config.json` with a
+unique key, label, default, range, `allow_negative`, `allow_zero`, and step;
+then apply it in `rl_training_world.gd` and add it to the order list. Update the
+training GUI only through the schema-backed fields. Bump `schema_version` for
+an incompatible meaning change, and add tests for its valid and invalid cases.
 
 ## Architecture and observation
 

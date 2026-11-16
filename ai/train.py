@@ -10,6 +10,7 @@ from pathlib import Path
 
 from godot_gym_env import ENVIRONMENT_VERSION, GodotRoadEnv
 from interface_schema import SchemaCompatibilityError, metadata as interface_metadata
+from reward_config import SCHEMA_VERSION as REWARD_SCHEMA_VERSION, reward_config_hash
 from training_control import TrainingControl, parse_reward_config
 from training_config import TRAINING_DEFAULTS, prepare_manifest, runtime_provenance
 from policy_checkpoint import (
@@ -187,6 +188,8 @@ def main() -> None:
         "workers": arguments.n_envs,
         "evaluation": {"seed": arguments.eval_seed, "episodes": arguments.eval_episodes, "threshold": arguments.success_threshold},
         "reward_config": reward_config,
+        "reward_config_schema_version": REWARD_SCHEMA_VERSION,
+        "reward_config_hash": reward_config_hash(reward_config),
         "learning_rate": arguments.learning_rate,
         "batch_size": arguments.batch_size,
         "gamma": arguments.gamma,

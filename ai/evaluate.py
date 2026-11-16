@@ -15,6 +15,7 @@ from policy_checkpoint import (
     load_policy,
     resolve_checkpoint,
 )
+from reward_config import RewardConfigError, reward_config_from_manifest
 from training_metrics import summarize_evaluation, evaluation_gate
 
 
@@ -78,9 +79,18 @@ def main() -> None:
             manifest=resolved.manifest_path,
             require_manifest=arguments.require_manifest,
         )
-    except (CheckpointError, SchemaCompatibilityError) as error:
+        reward_config = reward_config_from_manifest(
+            resolved.manifest,
+            source=f"checkpoint manifest {resolved.manifest_path or '(none)'}",
+        )
+    except (CheckpointError, SchemaCompatibilityError, RewardConfigError) as error:
         parser.error(str(error))
-    env = GodotRoadEnv(arguments.godot, visible=arguments.visible, generator_type=checkpoint_generator(resolved.path, arguments.generator_type, manifest=resolved.manifest_path))
+    env = GodotRoadEnv(
+        arguments.godot,
+        visible=arguments.visible,
+        reward_config=reward_config,
+        generator_type=checkpoint_generator(resolved.path, arguments.generator_type, manifest=resolved.manifest_path),
+    )
     results: list[dict[str, float | bool]] = []
     try:
         for episode in range(arguments.episodes):

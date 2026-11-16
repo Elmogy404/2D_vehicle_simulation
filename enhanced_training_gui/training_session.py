@@ -21,6 +21,7 @@ from training_config import TRAINING_DEFAULTS, run_exists
 from policy_checkpoint import manifest_for_model
 from godot_gym_env import ENVIRONMENT_VERSION
 from gui_train_launcher import process_is_running
+from reward_config import reward_config_from_manifest
 from training_control import DEFAULT_REWARD_CONFIG, parse_reward_config, write_json_atomic
 
 ACTIVE = {"starting", "running", "paused", "stopping", "saving"}
@@ -69,7 +70,8 @@ def resume_settings(checkpoint: str | Path) -> dict:
     evaluation = manifest["evaluation"]
     result.update(run_name=manifest_path.name.removesuffix("_training_config.json"),
         generator_type=manifest.get("generator_type", "original"),
-        resume=str(path), output_root=str(folder.parent), rewards=manifest["reward_config"],
+        resume=str(path), output_root=str(folder.parent),
+        rewards=reward_config_from_manifest(manifest, source=f"manifest {manifest_path}"),
         eval_seed=evaluation["seed"], eval_episodes=evaluation["episodes"],
         success_threshold=evaluation["threshold"])
     result.update({key: value for key, value in manifest.get("training_options", {}).items() if key in DEFAULTS})

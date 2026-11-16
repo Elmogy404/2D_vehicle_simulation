@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "description": "Single source of truth for reward parameters shared by training, evaluation, the Godot environment, and both GUIs.",
+  "order": [
+    "progress_gain",
+    "max_speed_reward",
+    "lane_penalty",
+    "edge_penalty",
+    "heading_penalty",
+    "step_penalty",
+    "crash_penalty",
+    "off_road_penalty",
+    "goal_reward",
+    "timeout_penalty"
+  ],
+  "defaults": {
+    "progress_gain": 1.0,
+    "max_speed_reward": 0.0,
+    "lane_penalty": 0.12,
+    "edge_penalty": 0.6,
+    "heading_penalty": 0.08,
+    "step_penalty": 0.01,
+    "crash_penalty": 35.0,
+    "off_road_penalty": 35.0,
+    "goal_reward": 40.0,
+    "timeout_penalty": 20.0
+  },
+  "parameters": {
+    "progress_gain": {
+      "label": "Forward progress reward",
+      "description": "Multiplier for bounded forward progress along the route.",
+      "type": "number",
+      "required": true,
+      "min": 0.0,
+      "max": 1000.0,
+      "allow_negative": false,
+      "allow_zero": true,
+      "zero_effect": "Disables progress shaping.",
+      "step": 0.01
+    },
+    "max_speed_reward": {
+      "label": "Top-speed reward (per step)",
+      "description": "Signed per-step bonus at top speed. A negative value intentionally penalizes top speed.",
+      "type": "number",
+      "required": true,
+      "min": -1000.0,
+      "max": 1000.0,
+      "allow_negative": true,
+      "allow_zero": true,
+      "zero_effect": "Disables the top-speed term.",
+      "step": 0.01
+    },
+    "lane_penalty": {
+      "label": "Lane deviation penalty",
+      "description": "Positive magnitude subtracted for deviation from the lane centre.",
+      "type": "number",
+      "required": true,
+      "min": 0.0,
+      "max": 1000.0,
+      "allow_negative": false,
+      "allow_zero": true,
+      "zero_effect": "Disables the lane-deviation penalty.",
+      "step": 0.01
+    },
+    "edge_penalty": {
+      "label": "Road-edge penalty",
+      "description": "Positive magnitude subtracted for pressure toward the road edge.",
+      "type": "number",
+      "required": true,
+      "min": 0.0,
+      "max": 1000.0,
+      "allow_negative": false,
+      "allow_zero": true,
+      "zero_effect": "Disables the road-edge penalty.",
+      "step": 0.01
+    },
+    "heading_penalty": {
+      "label": "Wrong-heading penalty",
+      "description": "Positive magnitude subtracted for heading error.",
+      "type": "number",
+      "required": true,
+      "min": 0.0,
+      "max": 1000.0,
+      "allow_negative": false,
+      "allow_zero": true,
+      "zero_effect": "Disables the heading penalty.",
+      "step": 0.01
+    },
+    "step_penalty": {
+      "label": "Per-step penalty",
+      "description": "Positive magnitude subtracted on every environment step.",
+      "type": "number",
+      "required": true,
+      "min": 0.0,
+      "max": 1000.0,
+      "allow_negative": false,
+      "allow_zero": true,
+      "zero_effect": "Disables the per-step time cost.",
+      "step": 0.01
+    },
+    "crash_penalty": {
+      "label": "Crash penalty",
+      "description": "Positive magnitude subtracted when an episode ends in a crash.",
+      "type": "number",
+      "required": true,
+      "min": 0.0,
+      "max": 1000.0,
+      "allow_negative": false,
+      "allow_zero": true,
+      "zero_effect": "Removes the terminal crash penalty.",
+      "step": 0.01
+    },
+    "off_road_penalty": {
+      "label": "Off-road penalty",
+      "description": "Positive magnitude subtracted when an episode ends off the drivable area.",
+      "type": "number",
+      "required": true,
+      "min": 0.0,
+      "max": 1000.0,
+      "allow_negative": false,
+      "allow_zero": true,
+      "zero_effect": "Removes the terminal off-road penalty.",
+      "step": 0.01
+    },
+    "goal_reward": {
+      "label": "Goal reward",
+      "description": "Reward added when the vehicle reaches the goal.",
+      "type": "number",
+      "required": true,
+      "min": 0.0,
+      "max": 1000.0,
+      "allow_negative": false,
+      "allow_zero": true,
+      "zero_effect": "Removes the terminal goal reward.",
+      "step": 0.01
+    },
+    "timeout_penalty": {
+      "label": "Timeout penalty",
+      "description": "Positive magnitude subtracted when an episode reaches its step limit.",
+      "type": "number",
+      "required": true,
+      "min": 0.0,
+      "max": 1000.0,
+      "allow_negative": false,
+      "allow_zero": true,
+      "zero_effect": "Removes the terminal timeout penalty.",
+      "step": 0.01
+    }
+  }
+}

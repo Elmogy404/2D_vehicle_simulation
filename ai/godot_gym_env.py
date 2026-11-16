@@ -22,6 +22,7 @@ from interface_schema import (
     validate_observation,
     validate_remote_metadata,
 )
+from reward_config import validate_reward_config
 
 
 ENVIRONMENT_VERSION = 3
@@ -61,10 +62,14 @@ class GodotRoadEnv(gym.Env[np.ndarray, np.ndarray]):
             high=observation_space_high(),
             dtype=np.float32,
         )
+        self.reward_config = validate_reward_config(
+            reward_config or {},
+            allow_partial=True,
+            source="GodotRoadEnv.reward_config",
+        )
         self.bridge = GodotBridge(godot_executable, visible=visible,
                                   parent_window_id=parent_window_id,
                                   close_visible_on_exit=close_visible_on_exit)
-        self.reward_config = dict(reward_config or {})
         self._pending_training_state: dict[str, Any] | None = None
 
     def reset(

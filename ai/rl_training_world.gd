@@ -4,6 +4,7 @@ const ROAD_SCENE := preload("res://scenes/RoadGenerator.tscn")
 const EGO_SCENE := preload("res://scenes/EgoVehicle.tscn")
 const DRIVING_TASK = preload("res://scripts/driving_task.gd")
 const INTERFACE_SCHEMA = preload("res://scripts/ai_interface_schema.gd")
+const REWARD_SCHEMA = preload("res://scripts/reward_config.gd")
 var driving_task := DRIVING_TASK.new()
 const SEGMENTED_GENERATOR = preload("res://scripts/segment_road_generator.gd")
 var generator_type := "original"
@@ -31,7 +32,7 @@ const SEGMENTED_GOAL_STAGES := [
 const CURRICULUM_WINDOW := 20
 const CURRICULUM_ADVANCE_RATE := 0.8
 const GOAL_RADIUS := 85.0
-static var DEFAULT_REWARD_CONFIG: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("res://ai/training_defaults.json"))["reward_config"]
+static var DEFAULT_REWARD_CONFIG: Dictionary = REWARD_SCHEMA.defaults()
 
 
 @export_category("Collision")
@@ -303,19 +304,10 @@ func _handle_request(line: String) -> void:
 
 
 func _set_reward_config(value: Variant) -> String:
-	if not value is Dictionary:
-		return "reward_config must be an object"
-	var supplied: Dictionary = value
-	reward_config = DEFAULT_REWARD_CONFIG.duplicate()
-	for key in supplied:
-		if not reward_config.has(key):
-			return "unknown reward setting: %s" % String(key)
-		if typeof(supplied[key]) != TYPE_FLOAT and typeof(supplied[key]) != TYPE_INT:
-			return "reward setting %s must be numeric" % String(key)
-		var numeric := float(supplied[key])
-		if is_nan(numeric) or is_inf(numeric) or numeric < 0.0 or numeric > 1000.0:
-			return "reward setting %s must be finite and between 0 and 1000" % String(key)
-		reward_config[key] = numeric
+	var outcome := REWARD_SCHEMA.validate(value, true)
+	if not bool(outcome.get("valid", false)):
+		return "; ".join(PackedStringArray(outcome.get("errors", [])))
+	reward_config = outcome["config"]
 	return ""
 
 

@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 
+from reward_config import parse_reward_config_text
 from training_config import REWARD_DEFAULTS
 
 DEFAULT_REWARD_CONFIG: dict[str, float] = dict(REWARD_DEFAULTS)
@@ -41,23 +42,15 @@ def write_json_atomic(path: Path, payload: dict[str, Any], *, attempts: int = 6)
 
 
 def parse_reward_config(raw: str | None) -> dict[str, float]:
-    """Validate GUI/CLI reward overrides without accepting unknown settings."""
-    result = DEFAULT_REWARD_CONFIG.copy()
+    """Validate GUI/CLI reward overrides with the shared reward schema.
+
+    CLI and GUI overrides are intentionally partial: omitted keys retain the
+    documented defaults.  Complete configurations recorded in training
+    manifests use strict validation instead.
+    """
     if not raw:
-        return result
-    supplied = json.loads(raw)
-    if not isinstance(supplied, dict):
-        raise ValueError("--reward-config must be a JSON object")
-    for key, value in supplied.items():
-        if key not in result:
-            raise ValueError(f"Unknown reward setting: {key}")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"Reward setting {key} must be numeric")
-        number = float(value)
-        if not 0.0 <= number <= 1000.0 or number != number:
-            raise ValueError(f"Reward setting {key} must be finite and between 0 and 1000")
-        result[key] = number
-    return result
+        return DEFAULT_REWARD_CONFIG.copy()
+    return parse_reward_config_text(raw, source="--reward-config", allow_partial=True)
 
 
 class TrainingControl:

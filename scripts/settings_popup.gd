@@ -2,19 +2,8 @@ extends CanvasLayer
 
 const TRAINING_DASHBOARD_SCRIPT := preload("res://scripts/training_dashboard.gd")
 const TRAINING_CONTROLLER_SCRIPT := preload("res://scripts/ai_training_controller.gd")
+const REWARD_SCHEMA := preload("res://scripts/reward_config.gd")
 const WORKER_WARNING_THRESHOLD := 32
-const REWARD_FIELDS := [
-	["progress_gain", "Forward progress reward", 1.0],
-	["max_speed_reward", "Top-speed reward (per step)", 0.0],
-	["lane_penalty", "Lane deviation penalty", 0.12],
-	["edge_penalty", "Road-edge penalty", 0.6],
-	["heading_penalty", "Wrong-heading penalty", 0.08],
-	["step_penalty", "Per-step penalty", 0.01],
-	["crash_penalty", "Crash penalty", 35.0],
-	["off_road_penalty", "Off-road penalty", 35.0],
-	["goal_reward", "Goal reward", 40.0],
-	["timeout_penalty", "Timeout penalty", 20.0],
-]
 
 
 signal generate_requested(seed_value: int, randomize_seed: bool, generator_type: int)
@@ -427,9 +416,17 @@ func _build_training_tab(tabs: TabContainer) -> void:
 	training_inputs["success_threshold"] = _training_number_field(fields, "Early-stop success threshold", 0.0, 1.0, 0.01, 0.9)
 	training_inputs["early_stop_patience"] = _training_number_field(fields, "Successful evaluations to stop (0 disables)", 0, 20, 1, 3)
 	_training_section(fields, "REWARD AND PENALTY WEIGHTS")
-	for definition in REWARD_FIELDS:
-		reward_inputs[definition[0]] = _training_number_field(
-			fields, String(definition[1]), 0.0, 1000.0, 0.01, float(definition[2])
+	var reward_parameters := REWARD_SCHEMA.parameters()
+	var reward_defaults := REWARD_SCHEMA.defaults()
+	for key in REWARD_SCHEMA.parameter_order():
+		var definition: Dictionary = reward_parameters[key]
+		reward_inputs[key] = _training_number_field(
+			fields,
+			String(definition["label"]),
+			float(definition["min"]),
+			float(definition["max"]),
+			float(definition.get("step", 0.01)),
+			float(reward_defaults[key])
 		)
 	var note := Label.new()
 	note.text = "Each worker runs an empty-road Godot world. Changes above apply only to a new run. Pausing waits for the current environment step; End saves the latest model. Changing rewards creates a new experiment—do not resume an older checkpoint with different weights."
@@ -447,8 +444,9 @@ func _build_training_tab(tabs: TabContainer) -> void:
 			field.selected = 1 if defaults["training"][key] == "segmented" else 0
 		elif key not in ["run_name", "output_root"]:
 			field.text = str(defaults["training"][key])
+	var schema_reward_defaults := REWARD_SCHEMA.defaults()
 	for key in reward_inputs:
-		reward_inputs[key].value = defaults["reward_config"][key]
+		reward_inputs[key].value = float(schema_reward_defaults[key])
 
 
 func _on_training_worker_count_changed(value: float) -> void:

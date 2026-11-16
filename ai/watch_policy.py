@@ -17,6 +17,7 @@ from policy_checkpoint import (
     load_policy as load_model,
     resolve_checkpoint,
 )
+from reward_config import RewardConfigError, reward_config_from_manifest
 
 
 def main() -> None:
@@ -64,9 +65,19 @@ def main() -> None:
             manifest=resolved.manifest_path,
             require_manifest=arguments.require_manifest,
         )
-    except (CheckpointError, SchemaCompatibilityError) as error:
+        reward_config = reward_config_from_manifest(
+            resolved.manifest,
+            source=f"checkpoint manifest {resolved.manifest_path or '(none)'}",
+        )
+    except (CheckpointError, SchemaCompatibilityError, RewardConfigError) as error:
         parser.error(str(error))
-    env = GodotRoadEnv(arguments.godot, visible=True, close_visible_on_exit=bool(arguments.stop_file), generator_type=checkpoint_generator(resolved.path, arguments.generator_type, manifest=resolved.manifest_path))
+    env = GodotRoadEnv(
+        arguments.godot,
+        visible=True,
+        close_visible_on_exit=bool(arguments.stop_file),
+        reward_config=reward_config,
+        generator_type=checkpoint_generator(resolved.path, arguments.generator_type, manifest=resolved.manifest_path),
+    )
     stop_file = Path(arguments.stop_file) if arguments.stop_file else None
     episode = 0
     successes = 0
