@@ -9,10 +9,14 @@ import math
 from pathlib import Path
 
 from godot_gym_env import ENVIRONMENT_VERSION, GodotRoadEnv
-from interface_schema import metadata as interface_metadata
+from interface_schema import SchemaCompatibilityError, metadata as interface_metadata
 from training_control import TrainingControl, parse_reward_config
 from training_config import TRAINING_DEFAULTS, prepare_manifest, runtime_provenance
-from policy_checkpoint import load_policy as load_sb3_checkpoint
+from policy_checkpoint import (
+    CheckpointError,
+    load_policy as load_sb3_checkpoint,
+    resolve_checkpoint,
+)
 
 
 def make_training_env(godot_executable: str | None, reward_config: dict[str, float], generator_type: str = "original", *,
@@ -231,7 +235,11 @@ def main() -> None:
     evaluation_env: object | None = None
     try:
         if arguments.resume:
-            model = load_sb3_checkpoint(arguments.resume, env)
+            try:
+                resume_checkpoint = resolve_checkpoint(arguments.resume)
+            except (CheckpointError, SchemaCompatibilityError) as error:
+                parser.error(str(error))
+            model = load_sb3_checkpoint(resume_checkpoint.path, env)
             restore_training_state(model)
             remaining_steps = arguments.steps - model.num_timesteps
             if remaining_steps <= 0:

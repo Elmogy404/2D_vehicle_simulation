@@ -14,9 +14,18 @@ const GOAL_RADIUS := 85.0
 const DEFAULT_AI_CHECKPOINT := 1
 const ORIGINAL_GENERATOR_TRAFFIC_COUNT := 8
 const SEGMENTED_GENERATOR_TRAFFIC_COUNT := 20
-const POLICY_MODEL_PATHS := {
-	1: "res://ai/models/setup2_network_routes_ppo_v1_best.zip",
-	2: "res://ai/models/checkpoints/setup2_network_routes_ppo_v1_276480_steps.zip"
+# Checkpoint paths are resolved by ai/policy_checkpoint.py. These entries only
+# choose a documented, deterministic discovery strategy; no model path is
+# duplicated in Godot. AI_CHECKPOINT=<path> overrides both entries.
+const AI_CHECKPOINT_STRATEGIES := {
+	1: {
+		"strategy": "best_then_latest",
+		"label": "auto: best checkpoint [1]"
+	},
+	2: {
+		"strategy": "latest",
+		"label": "latest completed checkpoint [2]"
+	}
 }
 const POLICY_SERVER_PATH := "res://ai/live_policy_server.py"
 
@@ -187,7 +196,7 @@ func toggle_ai_mode() -> void:
 
 
 func select_ai_checkpoint(checkpoint_id: int) -> void:
-	if not POLICY_MODEL_PATHS.has(checkpoint_id):
+	if not AI_CHECKPOINT_STRATEGIES.has(checkpoint_id):
 		return
 	if not environment_ready:
 		settings_popup.call("set_status", "Generate a map before starting the AI drive.")
@@ -228,11 +237,13 @@ func _enter_ai_mode() -> void:
 		settings_popup.call("set_status", ai_status)
 		_update_mode_hud()
 		return
-	var model_path := _selected_policy_model_path()
-	if not FileAccess.file_exists(model_path):
-		ai_status = "AI model not found: %s" % model_path
-		_update_mode_hud()
-		return
+	var model_override := _explicit_checkpoint_override()
+	if not model_override.is_empty():
+		var override_path := _global_checkpoint_path(model_override)
+		if not FileAccess.file_exists(override_path):
+			ai_status = "AI_CHECKPOINT not found: %s" % model_override
+			_update_mode_hud()
+			return
 	if not FileAccess.file_exists(POLICY_SERVER_PATH):
 		ai_status = "AI policy service is missing."
 		_update_mode_hud()
@@ -474,13 +485,23 @@ func _start_policy_service() -> void:
 			ai_python_executable = ai_venv_python
 		else:
 			ai_python_executable = "python"
-	var model_path := ProjectSettings.globalize_path(_selected_policy_model_path())
+	var model_override := _explicit_checkpoint_override()
 	var server_path := ProjectSettings.globalize_path(POLICY_SERVER_PATH)
 	var process_args := PackedStringArray([
 		"-u",
-		server_path,
-		"--model",
-		model_path,
+		server_path
+	])
+	if model_override.is_empty():
+		process_args.append_array([
+			"--strategy",
+			String(AI_CHECKPOINT_STRATEGIES[selected_ai_checkpoint]["strategy"])
+		])
+	else:
+		process_args.append_array([
+			"--model",
+			_global_checkpoint_path(model_override)
+		])
+	process_args.append_array([
 		"--port",
 		str(POLICY_SERVER_PORT)
 	])
@@ -677,14 +698,35 @@ func _policy_is_connected() -> bool:
 	return ai_peer != null and ai_peer.get_status() == StreamPeerTCP.STATUS_CONNECTED
 
 
-func _selected_policy_model_path() -> String:
-	return String(POLICY_MODEL_PATHS.get(selected_ai_checkpoint, POLICY_MODEL_PATHS[DEFAULT_AI_CHECKPOINT]))
+func _explicit_checkpoint_override() -> String:
+	return OS.get_environment("AI_CHECKPOINT").strip_edges()
+
+
+func _global_checkpoint_path(path: String) -> String:
+	if path.begins_with("res://") or path.begins_with("user://"):
+		return ProjectSettings.globalize_path(path)
+	if path.is_absolute_path():
+		return path
+	return ProjectSettings.globalize_path("res://" + path)
+
+
+func _selected_policy_strategy() -> String:
+	return String(
+		AI_CHECKPOINT_STRATEGIES.get(
+			selected_ai_checkpoint, AI_CHECKPOINT_STRATEGIES[DEFAULT_AI_CHECKPOINT]
+		)["strategy"]
+	)
 
 
 func _selected_checkpoint_label() -> String:
-	if selected_ai_checkpoint == 2:
-		return "276,480-step checkpoint [2]"
-	return "150k best checkpoint [1]"
+	var override := _explicit_checkpoint_override()
+	if not override.is_empty():
+		return "AI_CHECKPOINT override"
+	return String(
+		AI_CHECKPOINT_STRATEGIES.get(
+			selected_ai_checkpoint, AI_CHECKPOINT_STRATEGIES[DEFAULT_AI_CHECKPOINT]
+		)["label"]
+	)
 
 
 func _ai_driving_status() -> String:

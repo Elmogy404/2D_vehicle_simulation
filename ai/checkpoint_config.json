@@ -1,0 +1,7 @@
+{
+  "model_dir": "ai/models",
+  "default_checkpoint": null,
+  "manifest": null,
+  "strategy": "best_then_latest",
+  "require_manifest": false
+}

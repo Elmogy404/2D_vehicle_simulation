@@ -15,12 +15,17 @@ from interface_schema import (
     validate_observation,
     validate_remote_metadata,
 )
-from policy_checkpoint import load_policy
+from policy_checkpoint import STRATEGIES, load_policy, resolve_checkpoint
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", required=True, type=Path)
+    parser.add_argument("--model", type=Path, help="Explicit PPO checkpoint; overrides discovery")
+    parser.add_argument("--model-dir", type=Path, help="Override the configured checkpoint directory")
+    parser.add_argument("--strategy", choices=STRATEGIES, help="Automatic checkpoint selection strategy")
+    parser.add_argument("--manifest", type=Path, help="Optional training manifest for the selected checkpoint")
+    parser.add_argument("--config", type=Path, help="Optional checkpoint_config.json path")
+    parser.add_argument("--require-manifest", action="store_true", help="Reject checkpoints without a valid manifest")
     parser.add_argument("--port", required=True, type=int)
     return parser.parse_args()
 
@@ -39,14 +44,32 @@ def main() -> int:
     logger = logging.getLogger("live_policy")
 
     try:
-        if not arguments.model.is_file():
-            raise FileNotFoundError(f"PPO checkpoint does not exist: {arguments.model}")
-        model = load_policy(arguments.model)
-        logger.info(
-            "Loaded PPO checkpoint %s (interface schema v%d)", arguments.model, SCHEMA_VERSION
+        resolved = resolve_checkpoint(
+            arguments.model,
+            config_path=arguments.config,
+            model_dir=arguments.model_dir,
+            manifest=arguments.manifest,
+            strategy=arguments.strategy,
+            require_manifest=arguments.require_manifest,
         )
-    except Exception:
-        logger.exception("Could not load the live PPO checkpoint")
+        logger.info(
+            "Resolved PPO checkpoint %s (source=%s, strategy=%s, steps=%d, manifest=%s)",
+            resolved.path,
+            resolved.source,
+            resolved.strategy,
+            resolved.num_timesteps,
+            resolved.manifest_path or "none",
+        )
+        model = load_policy(
+            resolved.path,
+            manifest=resolved.manifest_path,
+            require_manifest=arguments.require_manifest,
+        )
+        logger.info(
+            "Loaded PPO checkpoint %s (interface schema v%d)", resolved.path, SCHEMA_VERSION
+        )
+    except Exception as error:
+        logger.exception("Could not load the live PPO checkpoint: %s", error)
         return 2
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

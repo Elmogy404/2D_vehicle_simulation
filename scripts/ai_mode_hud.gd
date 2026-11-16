@@ -3,7 +3,7 @@ extends CanvasLayer
 
 var mode_label: Label
 var detail_label: Label
-var checkpoint_label := "150k best checkpoint [1]"
+var checkpoint_label := "auto: best checkpoint [1]"
 
 
 func _ready() -> void:

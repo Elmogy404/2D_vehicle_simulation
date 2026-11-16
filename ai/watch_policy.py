@@ -7,18 +7,29 @@ from collections import deque
 from pathlib import Path
 
 from godot_gym_env import GodotRoadEnv
+from interface_schema import SchemaCompatibilityError
 
 
-from policy_checkpoint import load_policy as load_model, checkpoint_generator
+from policy_checkpoint import (
+    STRATEGIES,
+    CheckpointError,
+    checkpoint_generator,
+    load_policy as load_model,
+    resolve_checkpoint,
+)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model",
-        default="ai/models/setup2_network_routes_ppo_v1_best.zip",
-        help="Saved Stable-Baselines3 PPO model",
+        help="Explicit saved Stable-Baselines3 PPO model; overrides automatic discovery",
     )
+    parser.add_argument("--model-dir", type=Path, help="Override the configured checkpoint directory")
+    parser.add_argument("--strategy", choices=STRATEGIES, help="Automatic checkpoint selection strategy")
+    parser.add_argument("--manifest", type=Path, help="Optional training manifest for the selected checkpoint")
+    parser.add_argument("--config", type=Path, help="Optional checkpoint_config.json path")
+    parser.add_argument("--require-manifest", action="store_true", help="Reject checkpoints without a valid manifest")
     parser.add_argument("--seed", type=int, default=30_000)
     parser.add_argument(
         "--curriculum-stage",
@@ -33,13 +44,29 @@ def main() -> None:
     if arguments.curriculum_stage not in range(8):
         parser.error("--curriculum-stage must be from 0 to 7")
 
-    model_path = Path(arguments.model)
-    if not model_path.is_absolute():
-        model_path = Path(__file__).resolve().parents[1] / model_path
-    if model_path.suffix != ".zip":
-        model_path = model_path.with_suffix(".zip")
-    model = load_model(model_path)
-    env = GodotRoadEnv(arguments.godot, visible=True, close_visible_on_exit=bool(arguments.stop_file), generator_type=checkpoint_generator(model_path, arguments.generator_type))
+    model_path = Path(arguments.model) if arguments.model else None
+    try:
+        resolved = resolve_checkpoint(
+            model_path,
+            config_path=arguments.config,
+            model_dir=arguments.model_dir,
+            manifest=arguments.manifest,
+            strategy=arguments.strategy,
+            require_manifest=arguments.require_manifest,
+        )
+        print(
+            "Using checkpoint %s (source=%s, strategy=%s, steps=%d)"
+            % (resolved.path, resolved.source, resolved.strategy, resolved.num_timesteps),
+            flush=True,
+        )
+        model = load_model(
+            resolved.path,
+            manifest=resolved.manifest_path,
+            require_manifest=arguments.require_manifest,
+        )
+    except (CheckpointError, SchemaCompatibilityError) as error:
+        parser.error(str(error))
+    env = GodotRoadEnv(arguments.godot, visible=True, close_visible_on_exit=bool(arguments.stop_file), generator_type=checkpoint_generator(resolved.path, arguments.generator_type, manifest=resolved.manifest_path))
     stop_file = Path(arguments.stop_file) if arguments.stop_file else None
     episode = 0
     successes = 0

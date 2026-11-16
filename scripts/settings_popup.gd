@@ -265,17 +265,17 @@ func _build_interface() -> void:
 	checkpoint_row.add_theme_constant_override("separation", 10)
 	content.add_child(checkpoint_row)
 	var first_model := Button.new()
-	first_model.text = "Run best model  [1]"
+	first_model.text = "Auto: best checkpoint  [1]"
 	first_model.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	first_model.pressed.connect(_on_checkpoint_pressed.bind(1))
 	checkpoint_row.add_child(first_model)
 	var second_model := Button.new()
-	second_model.text = "Run 276k model  [2]"
+	second_model.text = "Latest completed  [2]"
 	second_model.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	second_model.pressed.connect(_on_checkpoint_pressed.bind(2))
 	checkpoint_row.add_child(second_model)
 	checkpoint_status = Label.new()
-	checkpoint_status.text = "Selected model: 150k best checkpoint"
+	checkpoint_status.text = "Selected model: auto: best checkpoint [1]"
 	checkpoint_status.add_theme_font_size_override("font_size", 11)
 	checkpoint_status.add_theme_color_override("font_color", Color(0.72, 0.81, 0.84))
 	content.add_child(checkpoint_status)

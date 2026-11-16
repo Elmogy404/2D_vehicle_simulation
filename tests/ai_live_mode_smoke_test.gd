@@ -30,8 +30,8 @@ func _run() -> void:
 		_fail("default AI target should start at 4,200 units")
 		return
 	if int(main_scene.get("selected_ai_checkpoint")) != 1 \
-	or not String(main_scene.call("_selected_policy_model_path")).ends_with("_best.zip"):
-		_fail("the 150k best checkpoint is not the default selection")
+	or String(main_scene.call("_selected_policy_strategy")) != "best_then_latest":
+		_fail("automatic best-checkpoint discovery is not the default selection")
 		return
 	if get_nodes_in_group("traffic").is_empty():
 		_fail("precondition failed: normal mode did not spawn traffic")
@@ -39,7 +39,7 @@ func _run() -> void:
 
 	_press_main_key(KEY_1)
 	if not bool(main_scene.get("ai_mode_active")):
-		_fail("key 1 did not start the default checkpoint")
+		_fail("key 1 did not start automatic checkpoint discovery")
 		return
 	if not get_nodes_in_group("traffic").is_empty():
 		_fail("traffic remained in AI mode")
@@ -97,8 +97,8 @@ func _run() -> void:
 	_press_main_key(KEY_2)
 	if not bool(main_scene.get("ai_mode_active")) \
 	or int(main_scene.get("selected_ai_checkpoint")) != 2 \
-	or not String(main_scene.call("_selected_policy_model_path")).ends_with("_276480_steps.zip"):
-		_fail("key 2 did not select the 276,480-step checkpoint")
+	or String(main_scene.call("_selected_policy_strategy")) != "latest":
+		_fail("key 2 did not select the latest-completed-checkpoint strategy")
 		return
 	deadline = Time.get_ticks_msec() + 30000
 	while Time.get_ticks_msec() < deadline:

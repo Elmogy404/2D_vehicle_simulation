@@ -225,20 +225,57 @@ per-episode outcomes, including the selected route's turn count. `--visible`
 opens the same empty-road training world with a camera, speed display, minimap,
 and goal marker. Close the window or press Escape to stop a visible watch.
 
+## Checkpoint discovery and validation
+
+All live inference, evaluation, watch, and training-resume entry points use
+`ai/policy_checkpoint.py` and the shared settings in
+`ai/checkpoint_config.json`. No model path is hardcoded in `main.gd` or in the
+Python tools. Selection priority is:
+
+1. An explicit `--model PATH` (or `AI_CHECKPOINT=PATH` for the Godot **I** key).
+2. The optional `default_checkpoint` in `checkpoint_config.json`.
+3. Automatic discovery in `model_dir` (default `ai/models`, including its
+   `checkpoints/` subdirectory).
+
+Discovery ignores hidden, temporary (`.tmp`, `.part`, `.partial`, `.incomplete`,
+`.download`), recovery (`*_recovery_*`), and invalid files. The default
+`strategy` is `best_then_latest`:
+
+- If exactly one `*_best.zip` is valid, it is selected.
+- If several are valid, their `*_best_score.json` evaluation scores are compared
+  and the highest wins. Without usable scores, selection fails as ambiguous
+  instead of guessing.
+- If no `*_best.zip` exists, the checkpoint with the most completed training
+  timesteps is selected. Equal timestep counts are broken by path, so repeated
+  runs select the same file.
+
+Use `--strategy latest` to ignore best models, or `--strategy best` to require
+one. Relative paths in the config and on the command line are resolved against
+the project root. `--model-dir`, `--manifest`, and `--config` override the
+configured locations. `--require-manifest` rejects checkpoints without an
+adjacent `*_training_config.json`.
+
+Before loading, the resolver checks that the file exists, is readable, is a
+Stable-Baselines3 ZIP with PPO settings, matches the current observation/action
+spaces and dtypes, and has a valid manifest when one is present. Legacy
+checkpoints without schema metadata stay loadable when their actual spaces
+match. Failures report the selected path, the reason, and the expected schema;
+there is no fallback to another model.
+
 ## In-game checkpoint monitor
 
-Press **1** to run the default `setup2_network_routes_ppo_v1_best.zip` model
-(the 150k best checkpoint); press **2** to switch to
-`setup2_network_routes_ppo_v1_276480_steps.zip`. Either key starts the selected
-model, or switches models while AI mode is active. **I** toggles between manual
-driving and the currently selected model. The planner selects a multi-turn
-route; the HUD and minimap show the goal and highlight the planned path. The
-HUD slider sets goal length from 250 to 5,500 world units; after changing it
-during a run, press **R** to start a new trip at that distance. Traffic,
-pedestrians, crosswalks, and signals are disabled during this monitor and
-restored when returning to manual mode.
+Press **1** to use automatic discovery (`best_then_latest`, normally the best
+checkpoint); press **2** to switch to the latest completed checkpoint by
+training timesteps. Either key starts the selected strategy, or switches while
+AI mode is active. Set `AI_CHECKPOINT` to an explicit checkpoint path to
+override both keys. **I** toggles between manual driving and the currently
+selected model. The planner selects a multi-turn route; the HUD and minimap
+show the goal and highlight the planned path. The HUD slider sets goal length
+from 250 to 5,500 world units; after changing it during a run, press **R** to
+start a new trip at that distance. Traffic, pedestrians, crosswalks, and signals
+are disabled during this monitor and restored when returning to manual mode.
 
 Treat this as an experimental live demonstration, not a validated autonomous
-driver: the 276,480-step checkpoint reached 0/16 goals on the held-out longest
-route tier. Detailed results are in
+driver: the older 276,480-step checkpoint reached 0/16 goals on the held-out
+longest route tier. Detailed results are in
 `ai/runs/setup2_network_routes_ppo_v1_276480_stage7_eval.csv`.

@@ -7,14 +7,25 @@ import csv
 from pathlib import Path
 
 from godot_gym_env import GodotRoadEnv
-from interface_schema import SCHEMA_VERSION
-from policy_checkpoint import load_policy, checkpoint_generator
+from interface_schema import SCHEMA_VERSION, SchemaCompatibilityError
+from policy_checkpoint import (
+    STRATEGIES,
+    CheckpointError,
+    checkpoint_generator,
+    load_policy,
+    resolve_checkpoint,
+)
 from training_metrics import summarize_evaluation, evaluation_gate
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", required=True, help="Saved Stable-Baselines3 PPO model")
+    parser.add_argument("--model", help="Saved Stable-Baselines3 PPO model; overrides discovery")
+    parser.add_argument("--model-dir", type=Path, help="Override the configured checkpoint directory")
+    parser.add_argument("--strategy", choices=STRATEGIES, help="Automatic checkpoint selection strategy")
+    parser.add_argument("--manifest", type=Path, help="Optional training manifest for the selected checkpoint")
+    parser.add_argument("--config", type=Path, help="Optional checkpoint_config.json path")
+    parser.add_argument("--require-manifest", action="store_true", help="Reject checkpoints without a valid manifest")
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--seed", type=int, default=1_000_000)
     parser.add_argument("--all-stages", action="store_true", help="Evaluate all eight tiers on independent holdout seeds")
@@ -47,9 +58,29 @@ def main() -> None:
     if not 0.0 <= arguments.success_threshold <= 1.0:
         parser.error("--success-threshold must be between 0 and 1")
 
-    model_path = Path(arguments.model)
-    model = load_policy(model_path)
-    env = GodotRoadEnv(arguments.godot, visible=arguments.visible, generator_type=checkpoint_generator(model_path, arguments.generator_type))
+    model_path = Path(arguments.model) if arguments.model else None
+    try:
+        resolved = resolve_checkpoint(
+            model_path,
+            config_path=arguments.config,
+            model_dir=arguments.model_dir,
+            manifest=arguments.manifest,
+            strategy=arguments.strategy,
+            require_manifest=arguments.require_manifest,
+        )
+        print(
+            "Using checkpoint %s (source=%s, strategy=%s, steps=%d)"
+            % (resolved.path, resolved.source, resolved.strategy, resolved.num_timesteps),
+            flush=True,
+        )
+        model = load_policy(
+            resolved.path,
+            manifest=resolved.manifest_path,
+            require_manifest=arguments.require_manifest,
+        )
+    except (CheckpointError, SchemaCompatibilityError) as error:
+        parser.error(str(error))
+    env = GodotRoadEnv(arguments.godot, visible=arguments.visible, generator_type=checkpoint_generator(resolved.path, arguments.generator_type, manifest=resolved.manifest_path))
     results: list[dict[str, float | bool]] = []
     try:
         for episode in range(arguments.episodes):
